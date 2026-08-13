@@ -59,7 +59,7 @@ async def ask_ai(prompt: str) -> str:
     
     try:
         response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-1.5-flash',
             contents=prompt,
             config={
                 'system_instruction': SYSTEM_INSTRUCTION,
