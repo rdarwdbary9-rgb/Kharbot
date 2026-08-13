@@ -22,7 +22,7 @@ from openai import AsyncOpenAI
 
 CONFIG = {
     "BOT_TOKEN": os.getenv("BOT_TOKEN"),
-    "OPENROUTER_API_KEY": os.getenv("OPENROUTER_API_KEY"),
+    "GROQ_API_KEY": os.getenv("GROQ_API_KEY"),
     "ADMIN_ID": int(os.getenv("ADMIN_ID", "0")),
     "ARR_SCORE": 10,
     "ARR_COOLDOWN": 30,
@@ -30,31 +30,33 @@ CONFIG = {
 }
 
 TOKEN = CONFIG["BOT_TOKEN"]
-OPENROUTER_API_KEY = CONFIG["OPENROUTER_API_KEY"]
+GROQ_API_KEY = CONFIG["GROQ_API_KEY"]
 ADMIN_ID = CONFIG["ADMIN_ID"]
 ARR_SCORE = CONFIG["ARR_SCORE"]
 ARR_COOLDOWN = CONFIG["ARR_COOLDOWN"]
 DAILY_SCORE = CONFIG["DAILY_SCORE"]
 
 # =========================================================
-# AI SETTINGS (OpenRouter - Llama 3 Free)
+# AI SETTINGS (Groq API - Ultra Fast & Free)
 # =========================================================
 
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+
 ai_client = None
-if OPENROUTER_API_KEY:
+if GROQ_API_KEY and GROQ_API_KEY.strip():
     ai_client = AsyncOpenAI(
-        api_key=OPENROUTER_API_KEY,
-        base_url="https://openrouter.ai/api/v1"
+        api_key=GROQ_API_KEY.strip(),
+        base_url="https://api.groq.com/openai/v1"
     )
 
 SYSTEM_INSTRUCTION = "تو 'خر‌بات' هستی؛ یک هوش مصنوعی بسیار بامزه، طنز و شوخ‌طبع. لحن صمیمی و باکل‌کل داشته باش."
 
 async def ask_ai(prompt: str) -> str:
     if not ai_client: 
-        return "🫏 کلید OPENROUTER_API_KEY در تنظیمات بلمو ست نشده است!"
+        return "🫏 کلید GROQ_API_KEY در تنظیمات بلمو ست نشده است!"
     try:
         response = await ai_client.chat.completions.create(
-            model="meta-llama/llama-3.3-70b-instruct:free",
+            model="llama-3.3-70b-versatile",  # مدل فوق‌العاده قوی و رایگان Groq
             messages=[
                 {"role": "system", "content": SYSTEM_INSTRUCTION},
                 {"role": "user", "content": prompt},
@@ -62,9 +64,8 @@ async def ask_ai(prompt: str) -> str:
         )
         return response.choices[0].message.content
     except Exception as e:
-        print(f"OpenRouter AI Error: {e}")
-        return "🫏 ای بابا، مخم هنگ کرد! چند لحظه دیگه دوباره بپرس."
-
+        print(f"Groq AI Error: {e}")
+        return "🫏 ای بابا، مخمو گاییدی! چند لحظه دیگه دوباره بپرس."
 # =========================================================
 # DATABASE
 # =========================================================
