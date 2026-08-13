@@ -26,8 +26,11 @@ DAILY_SCORE = 100
 # DATABASE
 # =========================
 
+# /tmp is writable on most hosting environments
+DB_PATH = "/tmp/kharbot.db"
+
 db = sqlite3.connect(
-    "kharbot.db",
+    DB_PATH,
     check_same_thread=False
 )
 
@@ -44,6 +47,7 @@ CREATE TABLE IF NOT EXISTS users (
 """)
 
 db.commit()
+
 
 # =========================
 # USER
@@ -142,10 +146,7 @@ def can_get_arr_score(user_id):
 
     now = time.time()
 
-    last_time = last_arr.get(
-        user_id,
-        0
-    )
+    last_time = last_arr.get(user_id, 0)
 
     if now - last_time < ARR_COOLDOWN:
         return False
@@ -156,13 +157,52 @@ def can_get_arr_score(user_id):
 
 
 ARR_RESPONSES = [
-    "Donkey detected!",
-    "ARRRRR!",
-    "Nice donkey sound!",
-    "The donkey approves!",
-    "ARRR! +10",
-    "The group is becoming a stable!"
+    "خر شناسایی شد! 🫏",
+    "عررررر! 🫏",
+    "صدای خر تأیید شد! 😂",
+    "خر‌بات تأیید کرد! 🫏",
+    "عررر! +10",
+    "گروه داره تبدیل به طویله میشه! 😂"
 ]
+
+
+# =========================
+# START
+# =========================
+
+async def start(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE
+):
+
+    user = update.effective_user
+
+    if user:
+        create_user(user)
+
+    await update.message.reply_text(
+        """
+🫏 به خر‌بات خوش اومدی!
+
+برای گرفتن امتیاز فقط بنویس:
+
+عر عر
+
+دستورات:
+
+/top
+🏆 جدول امتیازات
+
+/profile
+👤 پروفایل
+
+/daily
+🎁 جایزه روزانه
+
+/help
+📖 راهنما
+"""
+    )
 
 
 # =========================
@@ -186,19 +226,13 @@ async def leaderboard(
     if not users:
 
         await update.message.reply_text(
-            "No scores yet!"
+            "هنوز امتیازی ثبت نشده!"
         )
 
         return
 
-    text = "LEADERBOARD\n"
+    text = "🏆 جدول امتیازات\n"
     text += "================\n\n"
-
-    medals = [
-        "1.",
-        "2.",
-        "3."
-    ]
 
     for index, user in enumerate(users):
 
@@ -211,15 +245,18 @@ async def leaderboard(
         else:
             name = first_name
 
-        place = (
-            medals[index]
-            if index < 3
-            else str(index + 1) + "."
-        )
+        if index == 0:
+            place = "🥇"
+        elif index == 1:
+            place = "🥈"
+        elif index == 2:
+            place = "🥉"
+        else:
+            place = str(index + 1) + "."
 
         text += (
             f"{place} {name} - "
-            f"{score} points\n"
+            f"{score} امتیاز\n"
         )
 
     await update.message.reply_text(text)
@@ -236,19 +273,23 @@ async def profile(
 
     user = update.effective_user
 
+    if not user:
+        return
+
     create_user(user)
 
     score = get_score(user.id)
 
     await update.message.reply_text(
         f"""
-PROFILE
+👤 پروفایل
 
-Name: {user.first_name}
+نام: {user.first_name}
 
-Donkey points: {score}
+🫏 امتیاز خر: {score}
 
-Say "عر عر" to earn points!
+برای گرفتن امتیاز بنویس:
+عر عر
 """
     )
 
@@ -264,6 +305,9 @@ async def daily(
 
     user = update.effective_user
 
+    if not user:
+        return
+
     create_user(user)
 
     now = int(time.time())
@@ -276,23 +320,19 @@ async def daily(
 
     result = cursor.fetchone()
 
-    last_daily = result[0]
+    last_daily = result[0] if result else 0
 
     if now - last_daily < 86400:
 
-        remaining = 86400 - (
-            now - last_daily
-        )
+        remaining = 86400 - (now - last_daily)
 
         hours = remaining // 3600
 
-        minutes = (
-            remaining % 3600
-        ) // 60
+        minutes = (remaining % 3600) // 60
 
         await update.message.reply_text(
-            f"Daily reward already claimed!\n"
-            f"Come back in {hours}h {minutes}m."
+            f"🎁 جایزه امروز رو گرفتی!\n\n"
+            f"دوباره {hours} ساعت و {minutes} دقیقه دیگه بیا."
         )
 
         return
@@ -317,11 +357,11 @@ async def daily(
 
     await update.message.reply_text(
         f"""
-DAILY REWARD!
+🎁 جایزه روزانه!
 
-+{DAILY_SCORE} points
++{DAILY_SCORE} امتیاز 🫏
 
-Total: {score}
+امتیاز کل: {score}
 """
     )
 
@@ -337,23 +377,26 @@ async def help_command(
 
     await update.message.reply_text(
         """
-KHARBOT
+🫏 خر‌بات
 
-Commands:
+دستورات:
+
+/start
+شروع
 
 /top
-Leaderboard
+🏆 جدول امتیازات
 
 /profile
-Your profile
+👤 پروفایل
 
 /daily
-Daily reward
+🎁 جایزه روزانه
 
 /help
-Help
+📖 راهنما
 
-You can also type:
+برای گرفتن امتیاز هم می‌تونی بنویسی:
 
 عر
 عرعر
@@ -390,14 +433,16 @@ async def message_handler(
 
     text = text.strip().lower()
 
+    # =====================
     # ARR
+    # =====================
 
     if text in ARR_WORDS:
 
         if not can_get_arr_score(user.id):
 
             await update.message.reply_text(
-                "Wait a little before earning again!"
+                "⏳ یکم صبر کن، بعد دوباره عر بزن 😂"
             )
 
             return
@@ -417,15 +462,17 @@ async def message_handler(
             f"""
 {response}
 
-+{ARR_SCORE} points
++{ARR_SCORE} امتیاز 🫏
 
-Total: {score}
+امتیاز کل: {score}
 """
         )
 
         return
 
+    # =====================
     # PERSIAN COMMANDS
+    # =====================
 
     if text in {
         "جدول",
@@ -486,17 +533,24 @@ def main():
 
     if not TOKEN:
 
-        print(
-            "BOT_TOKEN is missing!"
-        )
+        print("ERROR: BOT_TOKEN is missing!")
 
         return
+
+    print("KHARBOT STARTING...")
 
     app = (
         Application
         .builder()
         .token(TOKEN)
         .build()
+    )
+
+    app.add_handler(
+        CommandHandler(
+            "start",
+            start
+        )
     )
 
     app.add_handler(
