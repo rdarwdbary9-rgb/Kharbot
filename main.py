@@ -13,7 +13,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from google import genai
+from openai import AsyncOpenAI
 
 # =========================================================
 # CONFIGURATION
@@ -21,7 +21,7 @@ from google import genai
 
 CONFIG = {
     "BOT_TOKEN": os.getenv("BOT_TOKEN"),
-    "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
+    "DEEPSEEK_API_KEY": os.getenv("DEEPSEEK_API_KEY"),
     "ADMIN_ID": int(os.getenv("ADMIN_ID", "0")),
     "DB_PATH": os.getenv("DB_PATH", "/tmp/kharbot.db"),
     "ARR_SCORE": 10,
@@ -30,7 +30,7 @@ CONFIG = {
 }
 
 TOKEN = CONFIG["BOT_TOKEN"]
-GEMINI_API_KEY = CONFIG["GEMINI_API_KEY"]
+DEEPSEEK_API_KEY = CONFIG["DEEPSEEK_API_KEY"]
 ADMIN_ID = CONFIG["ADMIN_ID"]
 DB_PATH = CONFIG["DB_PATH"]
 ARR_SCORE = CONFIG["ARR_SCORE"]
@@ -38,26 +38,33 @@ ARR_COOLDOWN = CONFIG["ARR_COOLDOWN"]
 DAILY_SCORE = CONFIG["DAILY_SCORE"]
 
 # =========================================================
-# AI SETTINGS (Google Gemini)
+# AI SETTINGS (DeepSeek API)
 # =========================================================
 
 ai_client = None
-if GEMINI_API_KEY:
-    ai_client = genai.Client(api_key=GEMINI_API_KEY)
+if DEEPSEEK_API_KEY:
+    ai_client = AsyncOpenAI(
+        api_key=DEEPSEEK_API_KEY, 
+        base_url="https://api.deepseek.com"
+    )
 
 SYSTEM_INSTRUCTION = "تو 'خر‌بات' هستی؛ یک هوش مصنوعی بسیار بامزه، طنز و شوخ‌طبع. لحن صمیمی و باکل‌کل داشته باش."
 
 async def ask_ai(prompt: str) -> str:
     if not ai_client: 
-        return "🫏 کلید GEMINI_API_KEY در تنظیمات بلمو ست نشده است!"
+        return "🫏 کلید DEEPSEEK_API_KEY در تنظیمات بلمو ست نشده است!"
     try:
-        response = ai_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=f"{SYSTEM_INSTRUCTION}\n\nسوال کاربر: {prompt}"
+        response = await ai_client.chat.completions.create(
+            model="deepseek-chat",
+            messages=[
+                {"role": "system", "content": SYSTEM_INSTRUCTION},
+                {"role": "user", "content": prompt},
+            ],
+            stream=False
         )
-        return response.text
+        return response.choices[0].message.content
     except Exception as e:
-        print(f"AI Error: {e}")
+        print(f"DeepSeek AI Error: {e}")
         return "🫏 ای بابا، مخم هنگ کرد! چند لحظه دیگه دوباره بپرس."
 
 # =========================================================
@@ -639,7 +646,6 @@ async def start_kharine(update, context):
     create_user(user)
     bot_username = (await context.bot.get_me()).username
     
-    # کد ایمن‌شده برای تایمر
     timeout_job = None
     if context.job_queue:
         timeout_job = context.job_queue.run_once(cancel_kharine_lobby, 120, data=chat.id)
@@ -748,6 +754,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if data == "profile": await profile(update, context)
         elif data == "help": await help_command(update, context)
         elif data == "store": await show_store(update, context)
+        return
+
+    if data.startswith("buy_"):
+        await buy_item(query, data.replace("buy_", ""))
         return
 
 # =========================================================
