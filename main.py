@@ -39,50 +39,15 @@ ARR_COOLDOWN = 30
 # =========================================================
 # DATABASE
 # =========================================================
-# در بلمو از مسیر فعلی استفاده می‌کنیم.
-# /tmp مناسب دیتابیس دائمی نیست.
 
-DB_PATH = "/tmp/kharbot.db")
+import sqlite3
 
-DB_PATH = DB_DIR / "kharbot.db"
+DB_PATH = "/tmp/kharbot.db"
 
 db = sqlite3.connect(
-    str(DB_PATH),
+    DB_PATH,
     check_same_thread=False
 )
-
-db.row_factory = sqlite3.Row
-
-cursor = db.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS users (
-    user_id INTEGER PRIMARY KEY,
-    username TEXT DEFAULT '',
-    first_name TEXT DEFAULT '',
-    score INTEGER DEFAULT 100,
-    last_daily INTEGER DEFAULT 0,
-    title TEXT DEFAULT '',
-    q_arr_count INTEGER DEFAULT 0,
-    q_game_count INTEGER DEFAULT 0,
-    q_ai_count INTEGER DEFAULT 0,
-    q_last_reset TEXT DEFAULT ''
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS inventory (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    item_id TEXT NOT NULL,
-    item_name TEXT NOT NULL,
-    quantity INTEGER DEFAULT 1,
-    UNIQUE(user_id, item_id)
-)
-""")
-
-db.commit()
-
 
 # =========================================================
 # DATABASE HELPERS
