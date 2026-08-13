@@ -13,7 +13,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
-from openai import AsyncOpenAI
+from google import genai
 
 # =========================================================
 # CONFIGURATION
@@ -21,7 +21,7 @@ from openai import AsyncOpenAI
 
 CONFIG = {
     "BOT_TOKEN": os.getenv("BOT_TOKEN"),
-    "DEEPSEEK_API_KEY": os.getenv("DEEPSEEK_API_KEY"),
+    "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
     "ADMIN_ID": int(os.getenv("ADMIN_ID", "0")),
     "DB_PATH": os.getenv("DB_PATH", "/tmp/kharbot.db"),
     "ARR_SCORE": 10,
@@ -30,7 +30,7 @@ CONFIG = {
 }
 
 TOKEN = CONFIG["BOT_TOKEN"]
-DEEPSEEK_API_KEY = CONFIG["DEEPSEEK_API_KEY"]
+GEMINI_API_KEY = CONFIG["GEMINI_API_KEY"]
 ADMIN_ID = CONFIG["ADMIN_ID"]
 DB_PATH = CONFIG["DB_PATH"]
 ARR_SCORE = CONFIG["ARR_SCORE"]
@@ -38,33 +38,26 @@ ARR_COOLDOWN = CONFIG["ARR_COOLDOWN"]
 DAILY_SCORE = CONFIG["DAILY_SCORE"]
 
 # =========================================================
-# AI SETTINGS (DeepSeek API)
+# AI SETTINGS (Google Gemini 2.0)
 # =========================================================
 
 ai_client = None
-if DEEPSEEK_API_KEY:
-    ai_client = AsyncOpenAI(
-        api_key=DEEPSEEK_API_KEY, 
-        base_url="https://api.deepseek.com"
-    )
+if GEMINI_API_KEY:
+    ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SYSTEM_INSTRUCTION = "تو 'خر‌بات' هستی؛ یک هوش مصنوعی بسیار بامزه، طنز و شوخ‌طبع. لحن صمیمی و باکل‌کل داشته باش."
 
 async def ask_ai(prompt: str) -> str:
     if not ai_client: 
-        return "🫏 کلید DEEPSEEK_API_KEY در تنظیمات بلمو ست نشده است!"
+        return "🫏 کلید GEMINI_API_KEY در تنظیمات بلمو ست نشده است!"
     try:
-        response = await ai_client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": SYSTEM_INSTRUCTION},
-                {"role": "user", "content": prompt},
-            ],
-            stream=False
+        response = ai_client.models.generate_content(
+            model='gemini-2.0-flash',  # مدل کاملاً فعال و رایگان
+            contents=f"{SYSTEM_INSTRUCTION}\n\nسوال کاربر: {prompt}"
         )
-        return response.choices[0].message.content
+        return response.text
     except Exception as e:
-        print(f"DeepSeek AI Error: {e}")
+        print(f"AI Error: {e}")
         return "🫏 ای بابا، مخم هنگ کرد! چند لحظه دیگه دوباره بپرس."
 
 # =========================================================
@@ -803,7 +796,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if clean_text == "سنگ":
         set_pending_game(user.id, "rps")
-        await update.message.reply_text("🪨📄✂️ **سنگ کاغذ قیچی**\n\nلطفاً مبلغ شرط را ارسال کن:")
+        await update.message.reply_text("🪨📄✂️ **بازی سنگ کاغذ قیچی**\n\nلطفاً مبلغ شرط را ارسال کن:")
         return
 
     if clean_text == "دوز":
@@ -858,3 +851,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+ 
