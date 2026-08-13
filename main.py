@@ -1,4 +1,3 @@
-
 import os
 import sqlite3
 import time
@@ -24,7 +23,6 @@ CONFIG = {
     "BOT_TOKEN": os.getenv("BOT_TOKEN"),
     "OPENROUTER_API_KEY": os.getenv("OPENROUTER_API_KEY"),
     "ADMIN_ID": int(os.getenv("ADMIN_ID", "0")),
-    "DB_PATH": os.getenv("DB_PATH", "kharbot.db"),
     "ARR_SCORE": 10,
     "ARR_COOLDOWN": 30,
     "DAILY_SCORE": 100,
@@ -33,7 +31,6 @@ CONFIG = {
 TOKEN = CONFIG["BOT_TOKEN"]
 OPENROUTER_API_KEY = CONFIG["OPENROUTER_API_KEY"]
 ADMIN_ID = CONFIG["ADMIN_ID"]
-DB_PATH = CONFIG["DB_PATH"]
 ARR_SCORE = CONFIG["ARR_SCORE"]
 ARR_COOLDOWN = CONFIG["ARR_COOLDOWN"]
 DAILY_SCORE = CONFIG["DAILY_SCORE"]
@@ -71,11 +68,7 @@ async def ask_ai(prompt: str) -> str:
 # DATABASE
 # =========================================================
 
-db_dir = os.path.dirname(DB_PATH)
-if db_dir:
-    os.makedirs(db_dir, exist_ok=True)
-
-db = sqlite3.connect(DB_PATH, check_same_thread=False)
+db = sqlite3.connect("kharbot.db", check_same_thread=False)
 cursor = db.cursor()
 
 cursor.execute("""
@@ -93,7 +86,6 @@ CREATE TABLE IF NOT EXISTS users (
     q_last_reset TEXT DEFAULT ''
 )
 """)
-db.commit()
 
 for col, col_type in [
     ("pending_game", "TEXT DEFAULT ''"),
@@ -105,7 +97,6 @@ for col, col_type in [
 ]:
     try:
         cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
-        db.commit()
     except Exception:
         pass
 
@@ -619,58 +610,245 @@ async def finish_ttt_game(query, game_id, winner):
     del active_ttt_games[game_id]
 
 # =========================================================
+# 🫏 KHARINE GAME (خرینه)
+# =========================================================
+
+kharine_games = {}
+
+def kharine_lobby_keyboard(chat_id, bot_username):
+    join_url = f"https://t.me/{bot_username}?start=join_{chat_id}"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🫏 ورود به بازی (در پیوی)", url=join_url)],
+        [InlineKeyboardButton("🚀 شروع بازی", callback_data=f"khstart:{chat_id}")]
+    ])
+
+def kharine_lobby_text(game):
+    text = "🫏 **خرینه**\n\n👥 بازیکنان:\n"
+    for i, p in enumerate(game["players"].values(), 1): text += f"{i}. {p['name']}\n"
+    text += f"\n👥 تعداد: {len(game['players'])}/8"
+    return text
+
+async def cancel_kharine_lobby(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data
+    game = kharine_games.get(chat_id)
+    if game and game.get("state") == "lobby":
+        del kharine_games[chat_id]
+        await context.bot.send_message(chat_id=chat_id, text="⏰ **لابی خرینه لغو شد.**")
+
+async def start_kharine(update, context):
+    chat, user = update.effective_chat, update.effective_user
+    if not chat or chat.type == "private" or chat.id in kharine_games: return
+
+    create_user(user)
+    bot_username = (await context.bot.get_me()).username
+    
+    timeout_job = None
+    if context.job_queue:
+        timeout_job = context.job_queue.run_once(cancel_kharine_lobby, 120, data=chat.id)
+
+    kharine_games[chat.id] = {
+        "players": {user.id: {"name": user.first_name, "username": user.username or "", "role": None, "alive": True}},
+        "state": "lobby", "day": 0, "message_id": None, "timeout_job": timeout_job
+    }
+    msg = await update.message.reply_text(kharine_lobby_text(kharine_games[chat.id]), reply_markup=kharine_lobby_keyboard(chat.id, bot_username))
+    kharine_games[chat.id]["message_id"] = msg.message_id
+
+# =========================================================
 # MESSAGE & CALLBACK HANDLERS
 # =========================================================
 
-async def message_handler(update, context):
-    user = update.effective_user
-    if not user or not update.message or not update.message.text: return
-    create_user(user)
-    text = update.message.text.strip().lower()
-    
-    if text in ARR_WORDS:
-        if can_get_arr_score(user.id): add_score(user.id, ARR_SCORE); update_quest(user.id, "arr"); await update.message.reply_text(f"🫏 عر زدی!\n+{ARR_SCORE} پوینت")
-    elif text.startswith("خر ") or text == "خر":
-        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-        response = await ask_ai(text[2:] if text != "خر" else "سلام خر!")
-        update_quest(user.id, "ai")
-        await update.message.reply_text(response)
-    elif text == "انفجار": set_pending_game(user.id, "crash"); await update.message.reply_text("مبلغ شرط:")
-    elif text == "سنگ": set_pending_game(user.id, "rps"); await update.message.reply_text("مبلغ شرط:")
-    elif text == "دوز": set_pending_game(user.id, "ttt"); await update.message.reply_text("مبلغ شرط:")
-    elif text.split()[0] == "بده" and len(text.split()) > 1 and update.message.reply_to_message:
-        context.args = [text.split()[1]]; await give_score(update, context)
+ARR_WORDS = {"عر", "عرعر", "عر عر", "عرر", "عررر", "عرررر"}
+last_arr = {}
 
-async def button_handler(update, context):
+def can_get_arr_score(user_id):
+    now = time.time()
+    if now - last_arr.get(user_id, 0) < ARR_COOLDOWN: return False
+    last_arr[user_id] = now
+    return True
+
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message: return
+    user = update.effective_user
+    if not user: return
+
+    create_user(user)
+    text = update.message.text
+    if not text: return
+    clean_text = text.strip().lower()
+
+    # دریافت مبلغ بازی‌های معلق
+    pending = get_pending_game(user.id)
+    if pending:
+        if clean_text.isdigit():
+            set_pending_game(user.id, "")
+            context.args = [clean_text]
+            if pending == "crash": await start_crash(update, context); update_quest(user.id, "game"); return
+            elif pending == "rps": await start_rps_command(update, context); update_quest(user.id, "game"); return
+            elif pending == "ttt": await start_ttt_command(update, context); update_quest(user.id, "game"); return
+        else:
+            set_pending_game(user.id, "")
+            await update.message.reply_text("❌ مبلغ معتبر نبود. بازی لغو شد.")
+            return
+
+    # دستور بده / give
+    parts = clean_text.split()
+    if parts[0] == "بده" and len(parts) > 1 and parts[1].isdigit():
+        if update.message.reply_to_message:
+            context.args = [parts[1]]
+            await give_score(update, context)
+        return
+
+    # بازی‌ها
+    if clean_text == "انفجار":
+        set_pending_game(user.id, "crash")
+        await update.message.reply_text("💥 **بازی انفجار**\n\nلطفاً مبلغ شرط را ارسال کن:")
+        return
+
+    if clean_text == "سنگ":
+        set_pending_game(user.id, "rps")
+        await update.message.reply_text("🪨📄✂️ **سنگ کاغذ قیچی**\n\nلطفاً مبلغ شرط را ارسال کن:")
+        return
+
+    if clean_text == "دوز":
+        set_pending_game(user.id, "ttt")
+        await update.message.reply_text("❌⭕ **بازی دوز**\n\nلطفاً مبلغ شرط را ارسال کن:")
+        return
+
+    if clean_text in {"شروع خرینه", "خرینه", "بازی خرینه"}:
+        await start_kharine(update, context)
+        return
+
+    # سیستم عر
+    if clean_text in ARR_WORDS:
+        if not can_get_arr_score(user.id):
+            await update.message.reply_text("⏳ یکم صبر کن بعد دوباره عر بزن 😂")
+            return
+        add_score(user.id, ARR_SCORE)
+        update_quest(user.id, "arr")
+        await update.message.reply_text(f"🫏 عر زدی، پوینت گرفتی!\n+{ARR_SCORE} 🫏 پوینت")
+        return
+
+    # دستورات منو
+    if clean_text in {"فروشگاه", "خرید"}: await show_store(update, context); return
+    if clean_text in {"پروفایل", "امتیاز"}: await profile(update, context); return
+    if clean_text in {"ماموریت", "ماموریت ها"}: await show_quests(update, context); return
+    if clean_text in {"انبار", "کیف پول"}: await show_inventory(update, context); return
+    if clean_text in {"راهنما", "کمک"}: await help_command(update, context); return
+
+    # هوش مصنوعی
+    if clean_text.startswith("خر ") or clean_text == "خر":
+        prompt_text = "سلام خر!" if clean_text == "خر" else text[2:].strip()
+        await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+        ai_response = await ask_ai(prompt_text)
+        update_quest(user.id, "ai")
+        await update.message.reply_text(ai_response)
+        return
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
     user = query.from_user
-    if data == "main_menu": await query.edit_message_text("🫏 **خر‌بات**", reply_markup=main_menu(user.id))
-    elif data == "profile": await profile(update, context)
-    elif data == "store": await show_store(update, context)
-    elif data == "quests": await show_quests(update, context)
-    elif data == "inventory": await show_inventory(update, context)
-    elif data == "daily": await daily(update, context)
-    elif data == "help": await help_command(update, context)
-    elif data == "admin_panel": await admin_panel(update, context)
-    elif data.startswith("buy_"): await buy_item(query, data.replace("buy_", ""))
-    elif data.startswith("rps_bot_"): await start_rps_command(update, context) #simplified logic
-    elif data.startswith("ttt_move_"): 
-        parts = data.split("_"); await handle_ttt_bot_move(query, f"{parts[2]}_{parts[3]}", int(parts[-1]))
+    create_user(user)
+
+    if data == "main_menu": await query.edit_message_text("🫏 **خر‌بات**\n\nبه قلمرو خرها خوش اومدی!", reply_markup=main_menu(user.id)); return
+    if data == "profile": await profile(update, context); return
+    if data == "store": await show_store(update, context); return
+    if data == "quests": await show_quests(update, context); return
+    if data == "inventory": await show_inventory(update, context); return
+    if data == "daily": await daily(update, context); return
+    if data == "help": await help_command(update, context); return
+    if data == "admin_panel": await admin_panel(update, context); return
+
+    if data == "crash_next": await crash_next_step(query); return
+    if data == "crash_cashout": await crash_cashout(query); return
+
+    if data.startswith("rps_bot_"):
+        bet = int(data.split("_")[2])
+        keyboard = InlineKeyboardMarkup([[
+            InlineKeyboardButton("🪨 سنگ", callback_data=f"rps_bplay_{bet}_stone"),
+            InlineKeyboardButton("📄 کاغذ", callback_data=f"rps_bplay_{bet}_paper"),
+            InlineKeyboardButton("✂️ قیچی", callback_data=f"rps_bplay_{bet}_scissors")
+        ]])
+        await query.edit_message_text("انتخابت رو بزن:", reply_markup=keyboard)
+        return
+
+    if data.startswith("rps_bplay_"):
+        _, _, bet, choice = data.split("_")
+        await play_rps_bot_choice(query, int(bet), choice)
+        return
+
+    if data.startswith("rps_pvp_"):
+        bet = int(data.split("_")[2])
+        await start_rps_pvp(query, bet)
+        return
+
+    if data.startswith("rps_accept_"):
+        await accept_rps_pvp(query, data.replace("rps_accept_", ""))
+        return
+
+    if data.startswith("rps_play_"):
+        parts = data.split("_")
+        await play_rps_pvp_choice(query, f"{parts[2]}_{parts[3]}", parts[4])
+        return
+
+    if data.startswith("ttt_bot_"):
+        await start_ttt_bot(query, int(data.split("_")[2]))
+        return
+
+    if data.startswith("ttt_pvp_"):
+        await start_ttt_pvp(query, int(data.split("_")[2]))
+        return
+
+    if data.startswith("ttt_accept_"):
+        await accept_ttt_pvp(query, data.replace("ttt_accept_", ""))
+        return
+
+    if data.startswith("ttt_move_"):
+        parts = data.split("_")
+        game_id = "_".join(parts[2:-1])
+        pos = int(parts[-1])
+        game = active_ttt_games.get(game_id)
+        if game:
+            if game["mode"] == "bot": await handle_ttt_bot_move(query, game_id, pos)
+            else: await handle_ttt_pvp_move(query, game_id, pos)
+        return
+
+    if data.startswith("buy_"):
+        await buy_item(query, data.replace("buy_", ""))
+        return
+
+# =========================================================
+# MAIN FUNCTION
+# =========================================================
 
 def main():
+    if not TOKEN:
+        print("ERROR: BOT_TOKEN is missing!")
+        return
+
+    print("KHARBOT STARTING...")
     app = Application.builder().token(TOKEN).build()
+
+    # عمومی
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("give", give_score))
     app.add_handler(CommandHandler("quests", show_quests))
     app.add_handler(CommandHandler("store", show_store))
     app.add_handler(CommandHandler("inventory", show_inventory))
+    app.add_handler(CommandHandler("daily", daily))
+    app.add_handler(CommandHandler("help", help_command))
+
+    # مالک / Admin
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("addcoin", admin_add_coin))
     app.add_handler(CommandHandler("removecoin", admin_remove_coin))
+
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+
+    print("KHARBOT STARTED")
     app.run_polling()
 
 if __name__ == "__main__":
