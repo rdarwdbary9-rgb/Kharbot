@@ -38,7 +38,7 @@ ARR_COOLDOWN = CONFIG["ARR_COOLDOWN"]
 DAILY_SCORE = CONFIG["DAILY_SCORE"]
 
 # =========================================================
-# AI SETTINGS
+# AI SETTINGS (Google Gemini)
 # =========================================================
 
 ai_client = None
@@ -48,10 +48,11 @@ if GEMINI_API_KEY:
 SYSTEM_INSTRUCTION = "تو 'خر‌بات' هستی؛ یک هوش مصنوعی بسیار بامزه، طنز و شوخ‌طبع. لحن صمیمی و باکل‌کل داشته باش."
 
 async def ask_ai(prompt: str) -> str:
-    if not ai_client: return "🫏 کلید API ست نشده!"
+    if not ai_client: 
+        return "🫏 کلید GEMINI_API_KEY در تنظیمات بلمو ست نشده است!"
     try:
         response = ai_client.models.generate_content(
-            model='gemini-2.0-flash',
+            model='gemini-2.5-flash',
             contents=f"{SYSTEM_INSTRUCTION}\n\nسوال کاربر: {prompt}"
         )
         return response.text
@@ -85,10 +86,19 @@ db.commit()
 
 for col, col_type in [("pending_game", "TEXT DEFAULT ''"), ("title", "TEXT DEFAULT ''")]:
     try:
-        cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}"); db.commit()
-    except: pass
+        cursor.execute(f"ALTER TABLE users ADD COLUMN {col} {col_type}")
+        db.commit()
+    except Exception:
+        pass
 
-cursor.execute("CREATE TABLE IF NOT EXISTS inventory (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, item_id TEXT, item_name TEXT)")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS inventory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    item_id TEXT,
+    item_name TEXT
+)
+""")
 db.commit()
 
 # =========================================================
@@ -109,20 +119,24 @@ def get_score(user_id):
     return res[0] if res else 0
 
 def add_score(user_id, amount):
-    cursor.execute("UPDATE users SET score = score + ? WHERE user_id = ?", (amount, user_id)); db.commit()
+    cursor.execute("UPDATE users SET score = score + ? WHERE user_id = ?", (amount, user_id))
+    db.commit()
 
 def remove_score(user_id, amount):
-    cursor.execute("UPDATE users SET score = score - ? WHERE user_id = ?", (amount, user_id)); db.commit()
+    cursor.execute("UPDATE users SET score = score - ? WHERE user_id = ?", (amount, user_id))
+    db.commit()
 
 def set_pending_game(user_id, game_name):
-    cursor.execute("UPDATE users SET pending_game = ? WHERE user_id = ?", (game_name, user_id)); db.commit()
+    cursor.execute("UPDATE users SET pending_game = ? WHERE user_id = ?", (game_name, user_id))
+    db.commit()
 
 def get_pending_game(user_id):
     cursor.execute("SELECT pending_game FROM users WHERE user_id = ?", (user_id,))
-    res = cursor.fetchone(); return res[0] if res else ""
+    res = cursor.fetchone()
+    return res[0] if res else ""
 
 # =========================================================
-# MENUS
+# MENUS & STORE
 # =========================================================
 
 def main_menu():
@@ -143,46 +157,153 @@ def store_menu():
     keyboard = []
     for item_id, item in STORE_ITEMS.items():
         keyboard.append([InlineKeyboardButton(f"{item['name']} — {item['price']} 🫏", callback_data=f"buy_{item_id}")])
-    keyboard.append([InlineKeyboardButton("🔙 بازگشت", callback_data="main_menu")])
+    keyboard.append([InlineKeyboardButton("🔙 بازگشت به منوی اصلی", callback_data="main_menu")])
     return InlineKeyboardMarkup(keyboard)
 
 # =========================================================
-# COMMAND HANDLERS (PART 1)
+# COMMANDS & GENERAL HANDLERS
 # =========================================================
 
-async def start(update, context):
-    create_user(update.effective_user)
-    await update.message.reply_text("🫏 **خر‌بات**\n\nبه قلمرو خرها خوش اومدی!", reply_markup=main_menu())
-
-async def profile(update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    if user:
+        create_user(user)
+
+    if context.args and context.args[0].startswith("join_"):
+        try:
+            chat_id = int(context.args[0].replace("join_", ""))
+        except ValueError:
+            await update.message.reply_text("❌ لینک ورود معتبر نیست!")
+            return
+
+        if chat_id not in kharine_games:
+            await update.message.reply_text("❌ این بازی تمام شده یا وجود ندارد!")
+            return
+
+        game = kharine_games[chat_id]
+        if game["state"] != "lobby":
+            await update.message.reply_text("⚠️ بازی قبلاً شروع شده است!")
+            return
+
+        if user.id in game["players"]:
+            await update.message.reply_text("🫏 شما قبلاً وارد این بازی شده‌اید!")
+            return
+
+        if len(game["players"]) >= 8:
+            await update.message.reply_text("❌ ظرفیت بازی پر شده است (حداکثر ۸ نفر).")
+            return
+
+        game["players"][user.id] = {
+            "name": user.first_name,
+            "username": user.username or "",
+            "role": None,
+            "alive": True
+        }
+
+        await update.message.reply_text("✅ با موفقیت وارد بازی خرینه شدی! به گروه برگرد.")
+
+        try:
+            bot_username = (await context.bot.get_me()).username
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=game["message_id"],
+                text=kharine_lobby_text(game),
+                reply_markup=kharine_lobby_keyboard(chat_id, bot_username)
+            )
+        except Exception as e:
+            print(f"Lobby Update Error: {e}")
+        return
+
+    await update.message.reply_text(
+        "🫏 **خر‌بات**\n\nبه قلمرو خرها خوش اومدی 😂",
+        reply_markup=main_menu()
+    )
+
+async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user: return
     create_user(user)
+
     cursor.execute("SELECT rps_games, rps_wins, rps_losses, rps_draws, title FROM users WHERE user_id = ?", (user.id,))
     row = cursor.fetchone()
     title = row[4] if (row and row[4]) else "🫏 خرِ معمولی"
-    text = f"👤 **پروفایل**\n🏷️ لقب: {title}\n💰 موجودی: {get_score(user.id)} 🫏"
-    if update.callback_query: await update.callback_query.edit_message_text(text)
-    else: await update.message.reply_text(text)
 
-async def give_score(update, context):
+    profile_text = (
+        f"👤 **پروفایل کاربری**\n"
+        f"━━━━━━━━━━━━━━━\n"
+        f"🏷️ **لقب:** {title}\n"
+        f"📝 **نام:** {user.first_name}\n"
+        f"🆔 **آیدی عددی:** `{user.id}`\n"
+        f"💰 **موجودی:** **{get_score(user.id)}** 🫏 پوینت\n"
+    )
+
+    if update.callback_query:
+        await update.callback_query.edit_message_text(profile_text)
+    else:
+        await update.message.reply_text(profile_text)
+
+async def give_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    if not update.message.reply_to_message:
-        await update.message.reply_text("❌ روی پیام طرف ریپلی کن و بنویس `/give 50`")
+    if not user or not update.message.reply_to_message:
+        await update.message.reply_text("❌ روی پیام شخص مورد نظر ریپلی کن و بنویس `/give 50` یا `بده 50`")
         return
-    target = update.message.reply_to_message.from_user
-    try: amount = int(context.args[0])
-    except: return
-    if get_score(user.id) < amount: await update.message.reply_text("❌ موجودی کافی نیست!"); return
-    remove_score(user.id, amount); add_score(target.id, amount)
-    await update.message.reply_text(f"✅ {amount} پوینت به {target.first_name} هدیه دادی!")
+
+    target_user = update.message.reply_to_message.from_user
+    if target_user.id == user.id:
+        await update.message.reply_text("🤡 نمی‌تونی به خودت پوینت بدی!")
+        return
+
+    try:
+        amount = int(context.args[0])
+    except (IndexError, ValueError):
+        await update.message.reply_text("❌ مبلغ معتبر نیست!")
+        return
+
+    if amount < 1:
+        await update.message.reply_text("❌ مبلغ باید حداقل ۱ پوینت باشد!")
+        return
+
+    create_user(user)
+    create_user(target_user)
+
+    if get_score(user.id) < amount:
+        await update.message.reply_text("❌ موجودی کافی نداری!")
+        return
+
+    remove_score(user.id, amount)
+    add_score(target_user.id, amount)
+    await update.message.reply_text(f"✅ **{amount}** پوینت با موفقیت به {target_user.first_name} هدیه داده شد!")
 
 async def help_command(update, context):
-    await update.message.reply_text("📖 راهنما:\nانفجار / سنگ / دوز / خرینه\nفروشگاه / عر / جایزه")
+    await update.message.reply_text("📖 **راهنما:**\nانفجار / سنگ / دوز / خرینه\nفروشگاه / جایزه / بده [مقدار]")
 
 async def show_store(update, context):
-    text = f"🛍️ موجودی: {get_score(update.effective_user.id)} 🫏"
-    if update.callback_query: await update.callback_query.edit_message_text(text, reply_markup=store_menu())
-    else: await update.message.reply_text(text, reply_markup=store_menu())
+    user = update.effective_user
+    if not user: return
+    create_user(user)
+    text = f"🛍️ **فروشگاه**\n💰 موجودی شما: **{get_score(user.id)}** 🫏"
+    if update.callback_query:
+        await update.callback_query.edit_message_text(text, reply_markup=store_menu())
+    else:
+        await update.message.reply_text(text, reply_markup=store_menu())
+
+async def buy_item(query, item_id):
+    user = query.from_user
+    item = STORE_ITEMS.get(item_id)
+    if not item: return
+
+    score = get_score(user.id)
+    if score < item["price"]:
+        await query.answer("❌ موجودی کافی نیست!", show_alert=True)
+        return
+
+    remove_score(user.id, item["price"])
+    cursor.execute("UPDATE users SET title = ? WHERE user_id = ?", (item["val"], user.id))
+    db.commit()
+
+    await query.answer("✅ خرید موفق!", show_alert=True)
+    await query.edit_message_text(f"🎉 مبارکه! لقب شما به `{item['val']}` تغییر کرد.", reply_markup=store_menu())
+
 # =========================================================
 # 💥 CRASH GAME (انفجار)
 # =========================================================
@@ -200,19 +321,15 @@ async def start_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user(user)
 
     try: bet = int(context.args[0])
-    except: return
+    except Exception: return
 
-    # حذف سقف ۵۰۰۰ پوینت
     if bet < 1 or get_score(user.id) < bet:
         await update.message.reply_text("❌ شرط باید حداقل ۱ پوینت باشد و موجودی کافی نداری!")
         return
 
     remove_score(user.id, bet)
     crash_point = generate_crash_multiplier()
-
-    active_crash_games[user.id] = {
-        "bet": bet, "crash_point": crash_point, "current_multiplier": 1, "cashed_out": False
-    }
+    active_crash_games[user.id] = {"bet": bet, "crash_point": crash_point, "current_multiplier": 1}
 
     if crash_point == 1:
         del active_crash_games[user.id]
@@ -224,10 +341,7 @@ async def start_crash(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("💰 برداشت پوینت", callback_data="crash_cashout")
     ]])
 
-    await update.message.reply_text(
-        f"🚀 **بازی انفجار شروع شد!**\n\n💵 شرط: **{bet}** پوینت\n📈 ضریب فعلی: **1x**\n💰 سود: **{bet}**",
-        reply_markup=keyboard
-    )
+    await update.message.reply_text(f"🚀 **بازی انفجار شروع شد!**\n💵 شرط: **{bet}** | 📈 ضریب: **1x**", reply_markup=keyboard)
 
 async def crash_next_step(query):
     user = query.from_user
@@ -248,26 +362,20 @@ async def crash_next_step(query):
         InlineKeyboardButton("📈 افزایش ضریب (+1)", callback_data="crash_next"),
         InlineKeyboardButton("💰 برداشت پوینت", callback_data="crash_cashout")
     ]])
-
     await query.answer()
-    await query.edit_message_text(
-        f"🚀 **ضریب بالا رفت!**\n\n💵 شرط: **{bet}** | 📈 ضریب: **{next_mult}x**\n💰 سود قابل برداشت: **{bet * next_mult}**",
-        reply_markup=keyboard
-    )
+    await query.edit_message_text(f"🚀 **ضریب بالا رفت!**\n💵 شرط: **{bet}** | 📈 ضریب: **{next_mult}x**\n💰 سود: **{bet * next_mult}**", reply_markup=keyboard)
 
 async def crash_cashout(query):
     user = query.from_user
     game = active_crash_games.get(user.id)
     if not game: return
 
-    bet, curr_mult = game["bet"], game["current_multiplier"]
-    win_amount = bet * curr_mult
-
+    win_amount = game["bet"] * game["current_multiplier"]
     add_score(user.id, win_amount)
     del active_crash_games[user.id]
 
     await query.answer("🎉 برداشت موفق!", show_alert=True)
-    await query.edit_message_text(f"✅ **برداشت موفق!**\n🎯 ضریب: **{curr_mult}x**\n🎁 دریافت شد: **+{win_amount}** 🫏")
+    await query.edit_message_text(f"✅ **برداشت موفق!**\n🎁 دریافت شد: **+{win_amount}** 🫏")
 
 # =========================================================
 # 🪨📄✂️ RPS GAME (سنگ کاغذ قیچی)
@@ -288,9 +396,8 @@ async def start_rps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user(user)
 
     try: bet = int(context.args[0])
-    except: return
+    except Exception: return
 
-    # حذف سقف ۵۰۰۰ پوینت
     if bet < 1 or get_score(user.id) < bet:
         await update.message.reply_text("❌ شرط باید حداقل ۱ پوینت باشد و موجودی کافی نداری!")
         return
@@ -299,36 +406,23 @@ async def start_rps_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("🤖 بازی با خر‌بات", callback_data=f"rps_bot_{bet}"),
         InlineKeyboardButton("👥 چالش در گروه", callback_data=f"rps_pvp_{bet}")
     ]])
-
-    await update.message.reply_text(
-        f"🪨📄✂️ **سنگ کاغذ قیچی شرطی**\n\n💵 مبلغ شرط: **{bet}** پوینت\n\nانتخاب کن:",
-        reply_markup=keyboard
-    )
+    await update.message.reply_text(f"🪨📄✂️ **سنگ کاغذ قیچی شرطی**\n💵 شرط: **{bet}** پوینت", reply_markup=keyboard)
 
 async def play_rps_bot_choice(query, bet, user_choice):
     user = query.from_user
     bot_choice = random.choice(list(RPS_CHOICES.keys()))
     res = rps_winner(user_choice, bot_choice)
 
-    cursor.execute("UPDATE users SET rps_games = rps_games + 1 WHERE user_id = ?", (user.id,))
-
     if res == "p1":
         add_score(user.id, bet)
-        cursor.execute("UPDATE users SET rps_wins = rps_wins + 1 WHERE user_id = ?", (user.id,))
         msg = f"🎉 **بردی!** (+{bet} پوینت)"
     elif res == "p2":
         remove_score(user.id, bet)
-        cursor.execute("UPDATE users SET rps_losses = rps_losses + 1 WHERE user_id = ?", (user.id,))
         msg = f"💀 **خر‌بات برد!** (-{bet} پوینت)"
     else:
-        cursor.execute("UPDATE users SET rps_draws = rps_draws + 1 WHERE user_id = ?", (user.id,))
         msg = "🤝 **مساوی شد!**"
 
-    db.commit()
-
-    await query.edit_message_text(
-        f"👤 تو: {RPS_CHOICES[user_choice]}\n🤖 خر‌بات: {RPS_CHOICES[bot_choice]}\n\n{msg}\n💰 موجودی: **{get_score(user.id)}**"
-    )
+    await query.edit_message_text(f"👤 تو: {RPS_CHOICES[user_choice]}\n🤖 خر‌بات: {RPS_CHOICES[bot_choice]}\n\n{msg}\n💰 موجودی: **{get_score(user.id)}**")
 
 async def start_rps_pvp(query, bet):
     chat, user = query.message.chat, query.from_user
@@ -339,25 +433,23 @@ async def start_rps_pvp(query, bet):
     game_id = f"{chat.id}_{int(time.time())}"
     active_group_rps[game_id] = {
         "p1_id": user.id, "p1_name": user.first_name, "p1_choice": None,
-        "p2_id": None, "p2_name": None, "p2_choice": None, "bet": bet, "state": "waiting"
+        "p2_id": None, "p2_name": None, "p2_choice": None, "bet": bet
     }
-
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⚔️ قبول چالش!", callback_data=f"rps_accept_{game_id}")]])
-    await query.edit_message_text(f"⚔️ **چالش سنگ کاغذ قیچی!**\n👤 ایجادکننده: **{user.first_name}**\n💵 شرط: **{bet}**", reply_markup=keyboard)
+    await query.edit_message_text(f"⚔️ **چالش سنگ کاغذ قیچی!**\n👤 **{user.first_name}** | 💵 شرط: **{bet}**", reply_markup=keyboard)
 
 async def accept_rps_pvp(query, game_id):
     user = query.from_user
     game = active_group_rps.get(game_id)
-    if not game or user.id == game["p1_id"] or get_score(user.id) < game["bet"]:
-        return
+    if not game or user.id == game["p1_id"] or get_score(user.id) < game["bet"]: return
 
-    game["p2_id"], game["p2_name"], game["state"] = user.id, user.first_name, "choosing"
+    game["p2_id"], game["p2_name"] = user.id, user.first_name
     keyboard = InlineKeyboardMarkup([[
         InlineKeyboardButton("🪨 سنگ", callback_data=f"rps_play_{game_id}_stone"),
         InlineKeyboardButton("📄 کاغذ", callback_data=f"rps_play_{game_id}_paper"),
         InlineKeyboardButton("✂️ قیچی", callback_data=f"rps_play_{game_id}_scissors")
     ]])
-    await query.edit_message_text(f"🎮 **مسابقه شروع شد!**\n⚔️ **{game['p1_name']}** VS **{game['p2_name']}**\n👇 انتخاب کنید:", reply_markup=keyboard)
+    await query.edit_message_text(f"🎮 **مسابقه شروع شد!**\n⚔️ **{game['p1_name']}** VS **{game['p2_name']}**\nانتخاب کنید:", reply_markup=keyboard)
 
 async def play_rps_pvp_choice(query, game_id, choice):
     user = query.from_user
@@ -414,9 +506,8 @@ async def start_ttt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user(user)
 
     try: bet = int(context.args[0])
-    except: return
+    except Exception: return
 
-    # حذف سقف ۵۰۰۰ پوینت
     if bet < 1 or get_score(user.id) < bet:
         await update.message.reply_text("❌ شرط باید حداقل ۱ پوینت باشد و موجودی کافی نداری!")
         return
@@ -425,7 +516,7 @@ async def start_ttt_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("🤖 بازی با خر‌بات", callback_data=f"ttt_bot_{bet}"),
         InlineKeyboardButton("👥 چالش در گروه", callback_data=f"ttt_pvp_{bet}")
     ]])
-    await update.message.reply_text(f"❌⭕ **بازی دوز شرطی**\n💵 شرط: **{bet}** پوینت\n\nانتخاب کن:", reply_markup=keyboard)
+    await update.message.reply_text(f"❌⭕ **بازی دوز شرطی**\n💵 شرط: **{bet}** پوینت", reply_markup=keyboard)
 
 async def start_ttt_bot(query, bet):
     user = query.from_user
@@ -468,7 +559,7 @@ async def start_ttt_pvp(query, bet):
         "turn_id": user.id, "state": "waiting"
     }
     keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⚔️ قبول چالش دوز!", callback_data=f"ttt_accept_{game_id}")]])
-    await query.edit_message_text(f"⚔️ **چالش دوز!**\n👤 **{user.first_name}** (❌)\n💵 شرط: **{bet}**", reply_markup=keyboard)
+    await query.edit_message_text(f"⚔️ **چالش دوز!**\n👤 **{user.first_name}** (❌) | 💵 شرط: **{bet}**", reply_markup=keyboard)
 
 async def accept_ttt_pvp(query, game_id):
     user = query.from_user
@@ -516,12 +607,56 @@ async def finish_ttt_game(query, game_id, winner):
         await query.edit_message_text(f"🏁 **پایان دوز دو نفره**\n{text}", reply_markup=render_ttt_board("fin", game["board"]))
 
 # =========================================================
-# ARR SYSTEM & CALLBACK BUTTON HANDLER
+# 🫏 KHARINE GAME (خرینه - ایمن‌شده)
 # =========================================================
 
-ARR_WORDS = {"عر", "عرعر", "عر عر", "عرر", "عررر", "عرررر", "عررررر", "ار ار", "ارار"}
+kharine_games = {}
+
+def kharine_lobby_keyboard(chat_id, bot_username):
+    join_url = f"https://t.me/{bot_username}?start=join_{chat_id}"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🫏 ورود به بازی (در پیوی)", url=join_url)],
+        [InlineKeyboardButton("🚀 شروع بازی", callback_data=f"khstart:{chat_id}")]
+    ])
+
+def kharine_lobby_text(game):
+    text = "🫏 **خرینه**\n\n👥 بازیکنان:\n"
+    for i, p in enumerate(game["players"].values(), 1): text += f"{i}. {p['name']}\n"
+    text += f"\n👥 تعداد: {len(game['players'])}/8"
+    return text
+
+async def cancel_kharine_lobby(context: ContextTypes.DEFAULT_TYPE):
+    chat_id = context.job.data
+    game = kharine_games.get(chat_id)
+    if game and game.get("state") == "lobby":
+        del kharine_games[chat_id]
+        await context.bot.send_message(chat_id=chat_id, text="⏰ **لابی خرینه لغو شد.**")
+
+async def start_kharine(update, context):
+    chat, user = update.effective_chat, update.effective_user
+    if not chat or chat.type == "private" or chat.id in kharine_games: return
+
+    create_user(user)
+    bot_username = (await context.bot.get_me()).username
+    
+    # کد ایمن‌شده برای تایمر
+    timeout_job = None
+    if context.job_queue:
+        timeout_job = context.job_queue.run_once(cancel_kharine_lobby, 120, data=chat.id)
+
+    kharine_games[chat.id] = {
+        "players": {user.id: {"name": user.first_name, "username": user.username or "", "role": None, "alive": True}},
+        "state": "lobby", "day": 0, "message_id": None, "timeout_job": timeout_job
+    }
+    msg = await update.message.reply_text(kharine_lobby_text(kharine_games[chat.id]), reply_markup=kharine_lobby_keyboard(chat.id, bot_username))
+    kharine_games[chat.id]["message_id"] = msg.message_id
+
+# =========================================================
+# SYSTEM ARR & CALLBACKS
+# =========================================================
+
+ARR_WORDS = {"عر", "عرعر", "عر عر", "عرر", "عررر", "عرررر"}
 last_arr = {}
-ARR_RESPONSES = ["🫏 خر شناسایی شد!", "🫏 عررررر!", "😂 صدای خر تأیید شد!", "🔥 عر زدی، پوینت گرفتی!"]
 
 def can_get_arr_score(user_id):
     now = time.time()
@@ -544,21 +679,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = InlineKeyboardMarkup([
             [InlineKeyboardButton("💥 انفجار", callback_data="btn_crash")],
             [InlineKeyboardButton("🪨 سنگ کاغذ قیچی", callback_data="btn_rps")],
-            [InlineKeyboardButton("❌⭕ دوز", callback_data="btn_ttt")]
+            [InlineKeyboardButton("❌⭕ دوز", callback_data="btn_ttt")],
+            [InlineKeyboardButton("🫏 خرینه", callback_data="btn_kharine")]
         ])
         await query.edit_message_text("🎮 **بازی‌ها:**", reply_markup=keyboard)
         return
 
-    if data in ["btn_crash", "btn_rps", "btn_ttt"]:
-        names = {"btn_crash": "انفجار", "btn_rps": "سنگ", "btn_ttt": "دوز"}
-        await query.edit_message_text(f"🎯 برای شروع این بازی کافیست کلمه **{names[data]}** را ارسال کنید!")
+    if data in ["btn_crash", "btn_rps", "btn_ttt", "btn_kharine"]:
+        names = {"btn_crash": "انفجار", "btn_rps": "سنگ", "btn_ttt": "دوز", "btn_kharine": "خرینه"}
+        await query.edit_message_text(f"🎯 برای شروع کافیست کلمه **{names[data]}** را بفرستید!")
         return
 
-    # مدیریت دکمه‌های انفجار
     if data == "crash_next": await crash_next_step(query); return
     if data == "crash_cashout": await crash_cashout(query); return
 
-    # مدیریت سنگ کاغذ قیچی
     if data.startswith("rps_bot_"):
         bet = int(data.split("_")[2])
         keyboard = InlineKeyboardMarkup([[
@@ -580,45 +714,37 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("rps_accept_"):
-        game_id = data.replace("rps_accept_", "")
-        await accept_rps_pvp(query, game_id)
+        await accept_rps_pvp(query, data.replace("rps_accept_", ""))
         return
 
     if data.startswith("rps_play_"):
         parts = data.split("_")
-        game_id = f"{parts[2]}_{parts[3]}"
-        choice = parts[4]
-        await play_rps_pvp_choice(query, game_id, choice)
+        await play_rps_pvp_choice(query, f"{parts[2]}_{parts[3]}", parts[4])
         return
 
-    # مدیریت دوز
     if data.startswith("ttt_bot_"):
-        bet = int(data.split("_")[2])
-        await start_ttt_bot(query, bet)
+        await start_ttt_bot(query, int(data.split("_")[2]))
         return
 
     if data.startswith("ttt_pvp_"):
-        bet = int(data.split("_")[2])
-        await start_ttt_pvp(query, bet)
+        await start_ttt_pvp(query, int(data.split("_")[2]))
         return
 
     if data.startswith("ttt_accept_"):
-        game_id = data.replace("ttt_accept_", "")
-        await accept_ttt_pvp(query, game_id)
+        await accept_ttt_pvp(query, data.replace("ttt_accept_", ""))
         return
 
     if data.startswith("ttt_move_"):
         parts = data.split("_")
         game_id = "_".join(parts[2:-1])
         pos = int(parts[-1])
-        
         game = active_ttt_games.get(game_id)
         if game:
             if game["mode"] == "bot": await handle_ttt_bot_move(query, game_id, pos)
             else: await handle_ttt_pvp_move(query, game_id, pos)
         return
 
-    if data in ["profile", "balance", "daily", "leaderboard", "help", "store"]:
+    if data in ["profile", "balance", "help", "store"]:
         if data == "profile": await profile(update, context)
         elif data == "help": await help_command(update, context)
         elif data == "store": await show_store(update, context)
@@ -638,7 +764,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text: return
     clean_text = text.strip().lower()
 
-    # ۱. دریافت مبلغ بازی معلق
     pending = get_pending_game(user.id)
     if pending:
         if clean_text.isdigit():
@@ -652,7 +777,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ مبلغ معتبر نبود. بازی لغو شد.")
             return
 
-    # ۲. دستور هدیه دادن (فارسی)
     parts = clean_text.split()
     if parts[0] == "بده" and len(parts) > 1 and parts[1].isdigit():
         if update.message.reply_to_message:
@@ -662,36 +786,36 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ باید روی پیام شخص مورد نظر ریپلی کنی و بنویسی: `بده 50`")
         return
 
-    # ۳. کلمات کلیدی بازی‌ها
     if clean_text == "انفجار":
         set_pending_game(user.id, "crash")
-        await update.message.reply_text("💥 **بازی انفجار**\n\nلطفاً مبلغ شرط را به عدد ارسال کن:")
+        await update.message.reply_text("💥 **بازی انفجار**\n\nلطفاً مبلغ شرط را ارسال کن:")
         return
 
     if clean_text == "سنگ":
         set_pending_game(user.id, "rps")
-        await update.message.reply_text("🪨📄✂️ **بازی سنگ کاغذ قیچی**\n\nلطفاً مبلغ شرط را به عدد ارسال کن:")
+        await update.message.reply_text("🪨📄✂️ **سنگ کاغذ قیچی**\n\nلطفاً مبلغ شرط را ارسال کن:")
         return
 
     if clean_text == "دوز":
         set_pending_game(user.id, "ttt")
-        await update.message.reply_text("❌⭕ **بازی دوز**\n\nلطفاً مبلغ شرط را به عدد ارسال کن:")
+        await update.message.reply_text("❌⭕ **بازی دوز**\n\nلطفاً مبلغ شرط را ارسال کن:")
         return
 
-    # ۴. سیستم عر
+    if clean_text in {"شروع خرینه", "خرینه", "بازی خرینه"}:
+        await start_kharine(update, context)
+        return
+
     if clean_text in ARR_WORDS:
         if not can_get_arr_score(user.id):
             await update.message.reply_text("⏳ یکم صبر کن بعد دوباره عر بزن 😂")
             return
         add_score(user.id, ARR_SCORE)
-        await update.message.reply_text(f"{random.choice(ARR_RESPONSES)}\n\n+{ARR_SCORE} 🫏 پوینت\n💰 موجودی: **{get_score(user.id)}**")
+        await update.message.reply_text(f"🫏 عر زدی، پوینت گرفتی!\n+{ARR_SCORE} 🫏 پوینت")
         return
 
-    # ۵. دستورات عمومی
-    if clean_text in {"فروشگاه", "مغازه", "خرید"}: await show_store(update, context); return
+    if clean_text in {"فروشگاه", "خرید"}: await show_store(update, context); return
     if clean_text in {"پروفایل", "امتیاز"}: await profile(update, context); return
 
-    # ۶. هوش مصنوعی (اصلاح‌شده: فقط زمانی که با «خر» شروع شود)
     if clean_text.startswith("خر ") or clean_text == "خر":
         prompt_text = "سلام خر!" if clean_text == "خر" else text[2:].strip()
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -711,13 +835,11 @@ def main():
     print("KHARBOT STARTING...")
     app = Application.builder().token(TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("give", give_score))
     app.add_handler(CommandHandler("help", help_command))
 
-    # Handlers
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
 
@@ -726,5 +848,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
