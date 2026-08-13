@@ -42,9 +42,7 @@ ARR_COOLDOWN = 30
 # در بلمو از مسیر فعلی استفاده می‌کنیم.
 # /tmp مناسب دیتابیس دائمی نیست.
 
-BASE_DIR = Path(__file__).resolve().parent
-DB_DIR = BASE_DIR / "data"
-DB_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = "/tmp/kharbot.db")
 
 DB_PATH = DB_DIR / "kharbot.db"
 
