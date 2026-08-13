@@ -2,6 +2,7 @@ import os
 import sqlite3
 import time
 import random
+from collections import Counter
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -13,9 +14,9 @@ from telegram.ext import (
     filters,
 )
 
-# ==================================================
+# =========================================================
 # SETTINGS
-# ==================================================
+# =========================================================
 
 TOKEN = os.getenv("BOT_TOKEN")
 
@@ -23,11 +24,12 @@ ARR_SCORE = 10
 ARR_COOLDOWN = 30
 DAILY_SCORE = 100
 
-DB_PATH = "/tmp/kharbot.db"
+# فعلاً برای جلوگیری از خطای permission
+DB_PATH = os.getenv("DB_PATH", "/tmp/kharbot.db")
 
-# ==================================================
+# =========================================================
 # DATABASE
-# ==================================================
+# =========================================================
 
 db = sqlite3.connect(
     DB_PATH,
@@ -52,9 +54,10 @@ CREATE TABLE IF NOT EXISTS users (
 
 db.commit()
 
-# ==================================================
-# USER
-# ==================================================
+
+# =========================================================
+# USER SYSTEM
+# =========================================================
 
 def create_user(user):
 
@@ -94,10 +97,6 @@ def create_user(user):
 
     db.commit()
 
-
-# ==================================================
-# SCORE
-# ==================================================
 
 def get_score(user_id):
 
@@ -140,9 +139,9 @@ def remove_score(user_id, amount):
     db.commit()
 
 
-# ==================================================
+# =========================================================
 # ARR SYSTEM
-# ==================================================
+# =========================================================
 
 ARR_WORDS = {
     "عر",
@@ -159,15 +158,21 @@ ARR_WORDS = {
 
 last_arr = {}
 
+ARR_RESPONSES = [
+    "🫏 خر شناسایی شد!",
+    "🫏 عررررر!",
+    "😂 صدای خر تأیید شد!",
+    "🔥 عر زدی، پوینت گرفتی!",
+    "🫏 خر‌بات راضی است!",
+    "😂 گروه داره تبدیل به طویله میشه!"
+]
+
 
 def can_get_arr_score(user_id):
 
     now = time.time()
 
-    last_time = last_arr.get(
-        user_id,
-        0
-    )
+    last_time = last_arr.get(user_id, 0)
 
     if now - last_time < ARR_COOLDOWN:
         return False
@@ -177,19 +182,9 @@ def can_get_arr_score(user_id):
     return True
 
 
-ARR_RESPONSES = [
-    "🫏 خر شناسایی شد!",
-    "🫏 عررررر!",
-    "😂 صدای خر تأیید شد!",
-    "🫏 خر‌بات تأیید کرد!",
-    "🔥 عررر! امتیاز گرفتی!",
-    "😂 گروه داره تبدیل به طویله میشه!"
-]
-
-
-# ==================================================
+# =========================================================
 # MAIN MENU
-# ==================================================
+# =========================================================
 
 def main_menu():
 
@@ -229,14 +224,11 @@ def main_menu():
     return InlineKeyboardMarkup(keyboard)
 
 
-# ==================================================
+# =========================================================
 # START
-# ==================================================
+# =========================================================
 
-async def start(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
 
@@ -247,27 +239,25 @@ async def start(
         """
 🫏 خر‌بات
 
-به قلمرو خرها خوش اومدی! 😂
+به قلمرو خرها خوش اومدی 😂
 
 💰 پوینت جمع کن
 🎮 بازی کن
+🫏 خرینه بازی کن
 🏆 رتبه بگیر
 🎁 جایزه بگیر
 
-برای شروع یکی از گزینه‌ها رو انتخاب کن:
+از منوی زیر استفاده کن:
 """,
         reply_markup=main_menu()
     )
 
 
-# ==================================================
+# =========================================================
 # PROFILE
-# ==================================================
+# =========================================================
 
-async def profile(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def profile(update, context):
 
     user = update.effective_user
 
@@ -290,11 +280,6 @@ async def profile(
 
     data = cursor.fetchone()
 
-    games = data[0]
-    wins = data[1]
-    losses = data[2]
-    draws = data[3]
-
     await update.message.reply_text(
         f"""
 👤 پروفایل
@@ -303,23 +288,20 @@ async def profile(
 
 💰 پوینت: {score}
 
-🎮 سنگ کاغذ قیچی
-بازی: {games}
-🏆 برد: {wins}
-💀 باخت: {losses}
-🤝 مساوی: {draws}
+🪨📄✂️ سنگ کاغذ قیچی
+🎮 بازی: {data[0]}
+🏆 برد: {data[1]}
+💀 باخت: {data[2]}
+🤝 مساوی: {data[3]}
 """
     )
 
 
-# ==================================================
+# =========================================================
 # BALANCE
-# ==================================================
+# =========================================================
 
-async def balance(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def balance(update, context):
 
     user = update.effective_user
 
@@ -328,21 +310,16 @@ async def balance(
 
     create_user(user)
 
-    score = get_score(user.id)
-
     await update.message.reply_text(
-        f"💰 موجودی شما:\n\n🫏 {score} پوینت"
+        f"💰 موجودی شما:\n\n🫏 {get_score(user.id)} پوینت"
     )
 
 
-# ==================================================
+# =========================================================
 # DAILY
-# ==================================================
+# =========================================================
 
-async def daily(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def daily(update, context):
 
     user = update.effective_user
 
@@ -365,15 +342,10 @@ async def daily(
 
     if now - last_daily < 86400:
 
-        remaining = 86400 - (
-            now - last_daily
-        )
+        remaining = 86400 - (now - last_daily)
 
         hours = remaining // 3600
-
-        minutes = (
-            remaining % 3600
-        ) // 60
+        minutes = (remaining % 3600) // 60
 
         await update.message.reply_text(
             f"""
@@ -385,10 +357,7 @@ async def daily(
 
         return
 
-    add_score(
-        user.id,
-        DAILY_SCORE
-    )
+    add_score(user.id, DAILY_SCORE)
 
     cursor.execute("""
     UPDATE users
@@ -401,28 +370,23 @@ async def daily(
 
     db.commit()
 
-    score = get_score(user.id)
-
     await update.message.reply_text(
         f"""
 🎁 جایزه روزانه!
 
-+{DAILY_SCORE} پوینت 🫏
++{DAILY_SCORE} 🫏 پوینت
 
 💰 موجودی:
-{score}
+{get_score(user.id)}
 """
     )
 
 
-# ==================================================
+# =========================================================
 # LEADERBOARD
-# ==================================================
+# =========================================================
 
-async def leaderboard(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def leaderboard(update, context):
 
     cursor.execute("""
     SELECT
@@ -446,50 +410,40 @@ async def leaderboard(
 
     text = "🏆 جدول برترین خرها\n\n"
 
-    for index, user in enumerate(users):
-
-        first_name = user[0]
-        username = user[1]
-        score = user[2]
+    for i, row in enumerate(users):
 
         name = (
-            "@" + username
-            if username
-            else first_name
+            "@" + row[1]
+            if row[1]
+            else row[0]
         )
 
-        if index == 0:
-            place = "🥇"
-        elif index == 1:
-            place = "🥈"
-        elif index == 2:
-            place = "🥉"
+        if i == 0:
+            medal = "🥇"
+        elif i == 1:
+            medal = "🥈"
+        elif i == 2:
+            medal = "🥉"
         else:
-            place = f"{index + 1}."
+            medal = f"{i + 1}."
 
-        text += (
-            f"{place} {name} — "
-            f"{score} 🫏\n"
-        )
+        text += f"{medal} {name} — {row[2]} 🫏\n"
 
     await update.message.reply_text(text)
 
 
-# ==================================================
+# =========================================================
 # HELP
-# ==================================================
+# =========================================================
 
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def help_command(update, context):
 
     await update.message.reply_text(
         """
 📖 راهنمای خر‌بات
 
 🫏 عر
-برای گرفتن پوینت
+گرفتن پوینت
 
 💰 موجودی
 دیدن پوینت
@@ -498,28 +452,52 @@ async def help_command(
 دیدن مشخصات
 
 🎁 جایزه
-گرفتن جایزه روزانه
+جایزه روزانه
 
 🏆 جدول
-دیدن رتبه‌ها
+جدول امتیازات
 
 🎮 بازی
-دیدن بازی‌ها
+منوی بازی‌ها
 
 🪨 سنگ کاغذ قیچی
-شروع بازی با خر‌بات
+بازی با خر‌بات
+
+🫏 شروع خرینه
+شروع بازی خرینه داخل گروه
 """
     )
 
 
-# ==================================================
-# RPS MENU
-# ==================================================
+# =========================================================
+# RPS
+# =========================================================
 
-async def rps_menu(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+RPS_CHOICES = {
+    "stone": "🪨 سنگ",
+    "paper": "📄 کاغذ",
+    "scissors": "✂️ قیچی"
+}
+
+
+def rps_winner(player, bot):
+
+    if player == bot:
+        return "draw"
+
+    if player == "stone" and bot == "scissors":
+        return "win"
+
+    if player == "paper" and bot == "stone":
+        return "win"
+
+    if player == "scissors" and bot == "paper":
+        return "win"
+
+    return "lose"
+
+
+async def rps_menu(update, context):
 
     keyboard = [
         [
@@ -539,57 +517,12 @@ async def rps_menu(
     ]
 
     await update.message.reply_text(
-        """
-🪨📄✂️ سنگ کاغذ قیچی
-
-انتخاب خودت رو بزن!
-"""
-        ,
+        "🪨📄✂️ انتخابت رو بزن:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 
-# ==================================================
-# RPS GAME
-# ==================================================
-
-RPS_CHOICES = {
-    "stone": "🪨 سنگ",
-    "paper": "📄 کاغذ",
-    "scissors": "✂️ قیچی"
-}
-
-
-def rps_winner(player, bot):
-
-    if player == bot:
-        return "draw"
-
-    if (
-        player == "stone"
-        and bot == "scissors"
-    ):
-        return "win"
-
-    if (
-        player == "paper"
-        and bot == "stone"
-    ):
-        return "win"
-
-    if (
-        player == "scissors"
-        and bot == "paper"
-    ):
-        return "win"
-
-    return "lose"
-
-
-async def rps_callback(
-    query,
-    choice
-):
+async def play_rps(query, choice):
 
     user = query.from_user
 
@@ -612,10 +545,7 @@ async def rps_callback(
 
     if result == "win":
 
-        add_score(
-            user.id,
-            100
-        )
+        add_score(user.id, 100)
 
         cursor.execute("""
         UPDATE users
@@ -623,11 +553,7 @@ async def rps_callback(
         WHERE user_id = ?
         """, (user.id,))
 
-        message = """
-🎉 بردی!
-
-+100 🫏 پوینت
-"""
+        message = "🎉 بردی!\n\n+100 پوینت 🫏"
 
     elif result == "lose":
 
@@ -637,11 +563,7 @@ async def rps_callback(
         WHERE user_id = ?
         """, (user.id,))
 
-        message = """
-💀 باختی!
-
-این بار خر‌بات برد 😂
-"""
+        message = "💀 باختی!\n\nخر‌بات برد 😂"
 
     else:
 
@@ -651,50 +573,1211 @@ async def rps_callback(
         WHERE user_id = ?
         """, (user.id,))
 
-        message = """
-🤝 مساوی شد!
-"""
+        message = "🤝 مساوی شد!"
 
     db.commit()
-
-    score = get_score(user.id)
 
     await query.edit_message_text(
         f"""
 🪨📄✂️ نتیجه
 
-انتخاب تو:
+تو:
 {RPS_CHOICES[choice]}
 
-انتخاب خر‌بات:
+خر‌بات:
 {RPS_CHOICES[bot_choice]}
 
 {message}
 
 💰 موجودی:
-{score} پوینت
+{get_score(user.id)}
 """
     )
 
 
-# ==================================================
-# CALLBACK BUTTONS
-# ==================================================
+# =========================================================
+# =========================================================
+# 🫏 KHARINE GAME
+# =========================================================
+# =========================================================
 
-async def button_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
+# ساختار بازی:
+#
+# chat_id -> {
+#     players: {
+#         user_id: {
+#             name,
+#             role,
+#             alive
+#         }
+#     },
+#     state,
+#     day,
+#     night_votes,
+#     doctor_target,
+#     seer_target,
+#     votes
+# }
+#
+# فقط یک بازی فعال در هر گروه.
+
+kharine_games = {}
+
+
+ROLE_NAMES = {
+    "kharine": "🐺 خرینه",
+    "seer": "🔮 فال‌خر",
+    "doctor": "🩺 خرپزشک",
+    "villager": "👨‍🌾 خر‌دار"
+}
+
+
+# =========================================================
+# ROLE DISTRIBUTION
+# =========================================================
+
+def create_roles(player_count):
+
+    if player_count == 4:
+
+        roles = [
+            "kharine",
+            "seer",
+            "doctor",
+            "villager"
+        ]
+
+    elif player_count == 5:
+
+        roles = [
+            "kharine",
+            "seer",
+            "doctor",
+            "villager",
+            "villager"
+        ]
+
+    elif player_count == 6:
+
+        roles = [
+            "kharine",
+            "kharine",
+            "seer",
+            "doctor",
+            "villager",
+            "villager"
+        ]
+
+    elif player_count == 7:
+
+        roles = [
+            "kharine",
+            "kharine",
+            "seer",
+            "doctor",
+            "villager",
+            "villager",
+            "villager"
+        ]
+
+    else:
+
+        roles = [
+            "kharine",
+            "kharine",
+            "seer",
+            "doctor",
+            "villager",
+            "villager",
+            "villager",
+            "villager"
+        ]
+
+    random.shuffle(roles)
+
+    return roles
+
+
+# =========================================================
+# KHARINE MENU
+# =========================================================
+
+def kharine_lobby_keyboard():
+
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "🫏 ورود به بازی",
+                callback_data="kharine_join"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🚪 خروج",
+                callback_data="kharine_leave"
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "🚀 شروع بازی",
+                callback_data="kharine_start"
+            )
+        ]
+    ])
+
+
+def kharine_lobby_text(game):
+
+    players = game["players"]
+
+    text = """
+🫏 خرینه
+
+🎭 یک بازی مافیایی مخصوص خر‌بات!
+
+👥 بازیکنان:
+"""
+
+    for i, player in enumerate(players.values(), 1):
+
+        text += f"{i}. {player['name']}\n"
+
+    text += f"""
+    
+👥 تعداد: {len(players)}/8
+
+حداقل بازیکن: 4 نفر
+
+برای ورود روی دکمه بزنید.
+"""
+
+    return text
+
+
+# =========================================================
+# START KHARINE
+# =========================================================
+
+async def start_kharine(update, context):
+
+    chat = update.effective_chat
+    user = update.effective_user
+
+    if not chat or chat.type == "private":
+
+        await update.message.reply_text(
+            "🫏 خرینه باید داخل گروه شروع بشه!"
+        )
+
+        return
+
+    if chat.id in kharine_games:
+
+        await update.message.reply_text(
+            "⚠️ یک بازی خرینه در این گروه در حال اجراست."
+        )
+
+        return
+
+    create_user(user)
+
+    kharine_games[chat.id] = {
+        "players": {
+            user.id: {
+                "name": user.first_name,
+                "username": user.username or "",
+                "role": None,
+                "alive": True
+            }
+        },
+        "state": "lobby",
+        "day": 0,
+        "message_id": None,
+        "night_kill": None,
+        "doctor_target": None,
+        "seer_target": None,
+        "votes": {}
+    }
+
+    message = await update.message.reply_text(
+        kharine_lobby_text(
+            kharine_games[chat.id]
+        ),
+        reply_markup=kharine_lobby_keyboard()
+    )
+
+    kharine_games[chat.id]["message_id"] = message.message_id
+
+
+# =========================================================
+# JOIN KHARINE
+# =========================================================
+
+async def join_kharine(query):
+
+    chat_id = query.message.chat_id
+    user = query.from_user
+
+    if chat_id not in kharine_games:
+
+        await query.answer(
+            "بازی وجود نداره!",
+            show_alert=True
+        )
+
+        return
+
+    game = kharine_games[chat_id]
+
+    if game["state"] != "lobby":
+
+        await query.answer(
+            "بازی قبلاً شروع شده!",
+            show_alert=True
+        )
+
+        return
+
+    if user.id in game["players"]:
+
+        await query.answer(
+            "قبلاً وارد بازی شدی!",
+            show_alert=True
+        )
+
+        return
+
+    if len(game["players"]) >= 8:
+
+        await query.answer(
+            "بازی پر شده!",
+            show_alert=True
+        )
+
+        return
+
+    create_user(user)
+
+    game["players"][user.id] = {
+        "name": user.first_name,
+        "username": user.username or "",
+        "role": None,
+        "alive": True
+    }
+
+    await query.answer(
+        "🫏 وارد بازی شدی!"
+    )
+
+    await query.edit_message_text(
+        kharine_lobby_text(game),
+        reply_markup=kharine_lobby_keyboard()
+    )
+
+
+# =========================================================
+# LEAVE KHARINE
+# =========================================================
+
+async def leave_kharine(query):
+
+    chat_id = query.message.chat_id
+    user = query.from_user
+
+    if chat_id not in kharine_games:
+
+        await query.answer(
+            "بازی وجود نداره!",
+            show_alert=True
+        )
+
+        return
+
+    game = kharine_games[chat_id]
+
+    if game["state"] != "lobby":
+
+        await query.answer(
+            "بازی شروع شده و نمی‌تونی خارج بشی!",
+            show_alert=True
+        )
+
+        return
+
+    if user.id not in game["players"]:
+
+        await query.answer(
+            "تو داخل بازی نیستی!",
+            show_alert=True
+        )
+
+        return
+
+    del game["players"][user.id]
+
+    await query.answer(
+        "🚪 از بازی خارج شدی."
+    )
+
+    if not game["players"]:
+
+        del kharine_games[chat_id]
+
+        await query.edit_message_text(
+            "🫏 لابی خرینه خالی شد."
+        )
+
+        return
+
+    await query.edit_message_text(
+        kharine_lobby_text(game),
+        reply_markup=kharine_lobby_keyboard()
+    )
+
+
+# =========================================================
+# START ACTUAL GAME
+# =========================================================
+
+async def begin_kharine(query, context):
+
+    chat_id = query.message.chat_id
+    user = query.from_user
+
+    if chat_id not in kharine_games:
+
+        await query.answer(
+            "بازی وجود نداره!",
+            show_alert=True
+        )
+
+        return
+
+    game = kharine_games[chat_id]
+
+    if game["state"] != "lobby":
+
+        await query.answer(
+            "بازی قبلاً شروع شده!",
+            show_alert=True
+        )
+
+        return
+
+    count = len(game["players"])
+
+    if count < 4:
+
+        await query.answer(
+            "حداقل ۴ بازیکن لازم است!",
+            show_alert=True
+        )
+
+        return
+
+    roles = create_roles(count)
+
+    for user_id, role in zip(
+        game["players"].keys(),
+        roles
+    ):
+
+        game["players"][user_id]["role"] = role
+
+    game["state"] = "night"
+    game["day"] = 1
+
+    await query.answer(
+        "🚀 بازی شروع شد!"
+    )
+
+    # ارسال نقش خصوصی
+    for user_id, player in game["players"].items():
+
+        role = player["role"]
+
+        role_text = ROLE_NAMES[role]
+
+        description = ""
+
+        if role == "kharine":
+
+            description = """
+تو عضو خرینه‌ها هستی.
+
+🌙 شب‌ها باید یک بازیکن را برای حذف انتخاب کنید.
+
+هدفت:
+کشتن اهالی طویله بدون لو رفتن.
+"""
+
+        elif role == "seer":
+
+            description = """
+تو فال‌خر هستی.
+
+🌙 هر شب می‌توانی نقش یک بازیکن را بررسی کنی.
+
+فقط نتیجه بررسی برای خودت نمایش داده می‌شود.
+"""
+
+        elif role == "doctor":
+
+            description = """
+تو خرپزشک هستی.
+
+🌙 هر شب می‌توانی یک نفر را نجات بدهی.
+"""
+
+        else:
+
+            description = """
+تو خر‌دار هستی.
+
+قدرت ویژه‌ای نداری.
+
+با صحبت و رأی‌گیری خرینه‌ها را پیدا کن.
+"""
+
+        try:
+
+            await context.bot.send_message(
+                chat_id=user_id,
+                text=f"""
+🎭 نقش تو در خرینه:
+
+{role_text}
+
+{description}
+
+⚠️ این نقش محرمانه است.
+به کسی نگو!
+"""
+            )
+
+        except Exception:
+
+            pass
+
+    await query.edit_message_text(
+        """
+🫏 خرینه شروع شد!
+
+🎭 نقش‌ها ارسال شدند.
+
+🌙 شب اول آغاز شد...
+
+بازیکنان نقش خود را در پیام خصوصی دریافت کرده‌اند.
+"""
+    )
+
+    await start_night(
+        chat_id,
+        context
+    )
+
+
+# =========================================================
+# NIGHT
+# =========================================================
+
+async def start_night(chat_id, context):
+
+    game = kharine_games.get(chat_id)
+
+    if not game:
+        return
+
+    game["state"] = "night"
+    game["night_kill"] = None
+    game["doctor_target"] = None
+    game["seer_target"] = None
+
+    # خرینه‌ها
+    for user_id, player in game["players"].items():
+
+        if not player["alive"]:
+            continue
+
+        if player["role"] != "kharine":
+            continue
+
+        keyboard = []
+
+        for target_id, target in game["players"].items():
+
+            if not target["alive"]:
+                continue
+
+            if target_id == user_id:
+                continue
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    target["name"],
+                    callback_data=f"khkill_{chat_id}_{target_id}"
+                )
+            ])
+
+        if keyboard:
+
+            try:
+
+                await context.bot.send_message(
+                    chat_id=user_id,
+                    text="🐺 خرینه‌ها: چه کسی را انتخاب می‌کنید؟",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+
+            except Exception:
+                pass
+
+    # فال‌خر
+    for user_id, player in game["players"].items():
+
+        if not player["alive"]:
+            continue
+
+        if player["role"] != "seer":
+            continue
+
+        keyboard = []
+
+        for target_id, target in game["players"].items():
+
+            if not target["alive"]:
+                continue
+
+            if target_id == user_id:
+                continue
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    target["name"],
+                    callback_data=f"khseer_{chat_id}_{target_id}"
+                )
+            ])
+
+        try:
+
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="🔮 نقش یک نفر را بررسی کن:",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        except Exception:
+            pass
+
+    # پزشک
+    for user_id, player in game["players"].items():
+
+        if not player["alive"]:
+            continue
+
+        if player["role"] != "doctor":
+            continue
+
+        keyboard = []
+
+        for target_id, target in game["players"].items():
+
+            if not target["alive"]:
+                continue
+
+            keyboard.append([
+                InlineKeyboardButton(
+                    target["name"],
+                    callback_data=f"khdoctor_{chat_id}_{target_id}"
+                )
+            ])
+
+        try:
+
+            await context.bot.send_message(
+                chat_id=user_id,
+                text="🩺 چه کسی را نجات می‌دهی؟",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+
+        except Exception:
+            pass
+
+    # برای ساده و قابل کنترل بودن،
+    # بعد از 30 ثانیه شب پردازش می‌شود.
+    context.job_queue.run_once(
+        finish_night_job,
+        30,
+        data=chat_id
+    )
+
+
+async def finish_night_job(context):
+
+    chat_id = context.job.data
+
+    await finish_night(
+        chat_id,
+        context
+    )
+
+
+# =========================================================
+# NIGHT ACTIONS
+# =========================================================
+
+async def kh_kill(query, chat_id, target_id):
+
+    try:
+        chat_id = int(chat_id)
+        target_id = int(target_id)
+    except Exception:
+        return
+
+    if chat_id not in kharine_games:
+        await query.answer("بازی تمام شده!", show_alert=True)
+        return
+
+    game = kharine_games[chat_id]
+
+    if game["state"] != "night":
+        await query.answer("الان شب نیست!", show_alert=True)
+        return
+
+    user_id = query.from_user.id
+
+    if user_id not in game["players"]:
+        return
+
+    if game["players"][user_id]["role"] != "kharine":
+        return
+
+    if not game["players"][user_id]["alive"]:
+        return
+
+    game["night_kill"] = target_id
+
+    await query.answer("🎯 انتخاب ثبت شد.")
+
+    await query.edit_message_text(
+        "🐺 انتخابت ثبت شد.\nمنتظر پایان شب باش."
+    )
+
+
+async def kh_seer(query, chat_id, target_id):
+
+    try:
+        chat_id = int(chat_id)
+        target_id = int(target_id)
+    except Exception:
+        return
+
+    if chat_id not in kharine_games:
+        return
+
+    game = kharine_games[chat_id]
+
+    user_id = query.from_user.id
+
+    if game["players"][user_id]["role"] != "seer":
+        return
+
+    role = game["players"][target_id]["role"]
+
+    if role == "kharine":
+
+        result = "🐺 این شخص خرینه است!"
+
+    else:
+
+        result = "🏘️ این شخص از خرینه‌ها نیست."
+
+    await query.answer(
+        result,
+        show_alert=True
+    )
+
+
+async def kh_doctor(query, chat_id, target_id):
+
+    try:
+        chat_id = int(chat_id)
+        target_id = int(target_id)
+    except Exception:
+        return
+
+    if chat_id not in kharine_games:
+        return
+
+    game = kharine_games[chat_id]
+
+    user_id = query.from_user.id
+
+    if game["players"][user_id]["role"] != "doctor":
+        return
+
+    game["doctor_target"] = target_id
+
+    await query.answer(
+        "🩺 انتخاب ثبت شد."
+    )
+
+    await query.edit_message_text(
+        "🩺 انتخاب نجات ثبت شد."
+    )
+
+
+# =========================================================
+# FINISH NIGHT
+# =========================================================
+
+async def finish_night(chat_id, context):
+
+    game = kharine_games.get(chat_id)
+
+    if not game:
+        return
+
+    if game["state"] != "night":
+        return
+
+    kill = game["night_kill"]
+    save = game["doctor_target"]
+
+    killed_player = None
+
+    if kill and kill != save:
+
+        if kill in game["players"]:
+
+            game["players"][kill]["alive"] = False
+
+            killed_player = game["players"][kill]
+
+    # صبح
+    game["state"] = "day"
+
+    if killed_player:
+
+        name = killed_player["name"]
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"""
+☀️ صبح شد!
+
+💀 دیشب {name} حذف شد.
+
+🎭 نقش او:
+{ROLE_NAMES[killed_player["role"]]}
+
+🗣️ حالا بازیکنان زنده بحث کنند.
+"""
+        )
+
+    else:
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="""
+☀️ صبح شد!
+
+😮 دیشب کسی حذف نشد!
+
+احتمالاً خرپزشک جان یک نفر را نجات داد.
+
+🗣️ وقت بحث است.
+"""
+        )
+
+    if await check_kharine_win(
+        chat_id,
+        context
+    ):
+        return
+
+    await start_voting(
+        chat_id,
+        context
+    )
+
+
+# =========================================================
+# VOTING
+# =========================================================
+
+async def start_voting(chat_id, context):
+
+    game = kharine_games.get(chat_id)
+
+    if not game:
+        return
+
+    game["state"] = "voting"
+    game["votes"] = {}
+
+    keyboard = []
+
+    for user_id, player in game["players"].items():
+
+        if not player["alive"]:
+            continue
+
+        keyboard.append([
+            InlineKeyboardButton(
+                player["name"],
+                callback_data=f"khvote_{chat_id}_{user_id}"
+            )
+        ])
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text="""
+🗳️ زمان رأی‌گیری!
+
+به کسی که فکر می‌کنی خرینه است رأی بده.
+
+هر بازیکن زنده فقط یک رأی دارد.
+""",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+    context.job_queue.run_once(
+        finish_voting_job,
+        30,
+        data=chat_id
+    )
+
+
+async def finish_voting_job(context):
+
+    chat_id = context.job.data
+
+    await finish_voting(
+        chat_id,
+        context
+    )
+
+
+async def kh_vote(query, chat_id, target_id):
+
+    try:
+        chat_id = int(chat_id)
+        target_id = int(target_id)
+    except Exception:
+        return
+
+    if chat_id not in kharine_games:
+        return
+
+    game = kharine_games[chat_id]
+
+    if game["state"] != "voting":
+
+        await query.answer(
+            "الان زمان رأی‌گیری نیست!",
+            show_alert=True
+        )
+
+        return
+
+    voter = query.from_user.id
+
+    if voter not in game["players"]:
+        return
+
+    if not game["players"][voter]["alive"]:
+
+        await query.answer(
+            "مرده‌ها رأی نمی‌دهند 😂",
+            show_alert=True
+        )
+
+        return
+
+    game["votes"][voter] = target_id
+
+    await query.answer(
+        "🗳️ رأی ثبت شد."
+    )
+
+    await query.edit_message_text(
+        "🗳️ رأی تو ثبت شد."
+    )
+
+
+# =========================================================
+# FINISH VOTING
+# =========================================================
+
+async def finish_voting(chat_id, context):
+
+    game = kharine_games.get(chat_id)
+
+    if not game:
+        return
+
+    if game["state"] != "voting":
+        return
+
+    votes = game["votes"]
+
+    if not votes:
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="🤷 هیچ رأیی ثبت نشد. روز بعد شروع می‌شود."
+        )
+
+        await start_night(
+            chat_id,
+            context
+        )
+
+        return
+
+    counter = Counter(votes.values())
+
+    max_votes = max(counter.values())
+
+    candidates = [
+        user_id
+        for user_id, count in counter.items()
+        if count == max_votes
+    ]
+
+    if len(candidates) > 1:
+
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="""
+🤝 رأی‌گیری مساوی شد!
+
+کسی حذف نشد.
+
+🌙 شب بعد شروع می‌شود.
+"""
+        )
+
+        await start_night(
+            chat_id,
+            context
+        )
+
+        return
+
+    eliminated_id = candidates[0]
+
+    if eliminated_id not in game["players"]:
+        return
+
+    game["players"][eliminated_id]["alive"] = False
+
+    eliminated = game["players"][eliminated_id]
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"""
+🗳️ نتیجه رأی‌گیری:
+
+💀 {eliminated["name"]} از بازی حذف شد.
+
+🎭 نقش:
+{ROLE_NAMES[eliminated["role"]]}
+"""
+    )
+
+    if await check_kharine_win(
+        chat_id,
+        context
+    ):
+        return
+
+    await start_night(
+        chat_id,
+        context
+    )
+
+
+# =========================================================
+# CHECK WIN
+# =========================================================
+
+async def check_kharine_win(chat_id, context):
+
+    game = kharine_games.get(chat_id)
+
+    if not game:
+        return True
+
+    alive_players = [
+        p
+        for p in game["players"].values()
+        if p["alive"]
+    ]
+
+    kharines = [
+        p
+        for p in alive_players
+        if p["role"] == "kharine"
+    ]
+
+    villagers = [
+        p
+        for p in alive_players
+        if p["role"] != "kharine"
+    ]
+
+    # خرینه‌ها با برابر شدن تعداد برنده می‌شوند
+    if len(kharines) >= len(villagers):
+
+        await end_kharine(
+            chat_id,
+            context,
+            "kharine"
+        )
+
+        return True
+
+    # اگر خرینه‌ای باقی نمانده
+    if len(kharines) == 0:
+
+        await end_kharine(
+            chat_id,
+            context,
+            "villagers"
+        )
+
+        return True
+
+    return False
+
+
+# =========================================================
+# END KHARINE
+# =========================================================
+
+async def end_kharine(
+    chat_id,
+    context,
+    winner
 ):
+
+    game = kharine_games.get(chat_id)
+
+    if not game:
+        return
+
+    if winner == "kharine":
+
+        winning_text = """
+🐺 خرینه‌ها برنده شدند!
+
+🫏 طویله سقوط کرد!
+"""
+
+        winning_role = "kharine"
+
+    else:
+
+        winning_text = """
+🏘️ اهالی طویله برنده شدند!
+
+🐺 تمام خرینه‌ها پیدا شدند!
+"""
+
+        winning_role = "villagers"
+
+    rewards = []
+
+    for user_id, player in game["players"].items():
+
+        if winner == "kharine":
+
+            if player["role"] == "kharine":
+
+                reward = 500
+
+            else:
+
+                reward = 0
+
+        else:
+
+            if player["role"] != "kharine":
+
+                reward = 300
+
+            else:
+
+                reward = 0
+
+        if reward > 0:
+
+            add_score(
+                user_id,
+                reward
+            )
+
+            rewards.append(
+                f"🫏 {player['name']} +{reward}"
+            )
+
+    text = winning_text
+
+    text += "\n🏆 جوایز:\n"
+
+    if rewards:
+
+        text += "\n".join(rewards)
+
+    else:
+
+        text += "امتیازی داده نشد."
+
+    text += "\n\n🎭 نقش‌ها:\n"
+
+    for player in game["players"].values():
+
+        status = (
+            "❤️ زنده"
+            if player["alive"]
+            else "💀 حذف شده"
+        )
+
+        text += (
+            f"{player['name']} — "
+            f"{ROLE_NAMES[player['role']]} — "
+            f"{status}\n"
+        )
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text
+    )
+
+    del kharine_games[chat_id]
+
+
+# =========================================================
+# BUTTON HANDLER
+# =========================================================
+
+async def button_handler(update, context):
 
     query = update.callback_query
 
     await query.answer()
 
+    data = query.data
+
     user = query.from_user
 
     create_user(user)
 
-    data = query.data
+    # -----------------------------
+    # MAIN MENU
+    # -----------------------------
 
     if data == "profile":
 
@@ -732,13 +1815,11 @@ async def button_handler(
 
     if data == "balance":
 
-        score = get_score(user.id)
-
         await query.edit_message_text(
             f"""
 💰 موجودی
 
-🫏 {score} پوینت
+🫏 {get_score(user.id)} پوینت
 """,
             reply_markup=main_menu()
         )
@@ -784,7 +1865,7 @@ async def button_handler(
 
         await query.edit_message_text(
             f"""
-🎁 جایزه دریافت شد!
+🎁 جایزه گرفتی!
 
 +{DAILY_SCORE} پوینت 🫏
 
@@ -844,14 +1925,19 @@ async def button_handler(
             ],
             [
                 InlineKeyboardButton(
-                    "🔙 بازگشت",
-                    callback_data="back"
+                    "🫏 خرینه",
+                    callback_data="kharine_info"
                 )
             ]
         ]
 
         await query.edit_message_text(
-            "🎮 بازی‌ها",
+            """
+🎮 بازی‌های خر‌بات
+
+🪨📄✂️ سنگ کاغذ قیچی
+🫏 خرینه — بازی گروهی
+""",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -889,32 +1975,26 @@ async def button_handler(
             """
 📖 راهنما
 
-🫏 عر = +10 پوینت
+🫏 عر
++10 پوینت
 
-🎁 جایزه = +100 پوینت روزانه
+🎁 جایزه
++100 پوینت روزانه
 
 🪨📄✂️ سنگ کاغذ قیچی
 بازی با خر‌بات
 
-💰 موجودی
-دیدن پوینت
-
-🏆 جدول
-دیدن رتبه‌ها
+🫏 شروع خرینه
+شروع بازی گروهی
 """,
             reply_markup=main_menu()
         )
 
         return
 
-    if data == "back":
-
-        await query.edit_message_text(
-            "🫏 منوی اصلی",
-            reply_markup=main_menu()
-        )
-
-        return
+    # -----------------------------
+    # RPS
+    # -----------------------------
 
     if data.startswith("rps_"):
 
@@ -923,20 +2003,120 @@ async def button_handler(
             ""
         )
 
-        await rps_callback(
+        await play_rps(
             query,
             choice
         )
 
+        return
 
-# ==================================================
+    # -----------------------------
+    # KHARINE
+    # -----------------------------
+
+    if data == "kharine_join":
+
+        await join_kharine(query)
+
+        return
+
+    if data == "kharine_leave":
+
+        await leave_kharine(query)
+
+        return
+
+    if data == "kharine_start":
+
+        await begin_kharine(
+            query,
+            context
+        )
+
+        return
+
+    if data.startswith("khkill_"):
+
+        _, chat_id, target_id = data.split("_")
+
+        await kh_kill(
+            query,
+            chat_id,
+            target_id
+        )
+
+        return
+
+    if data.startswith("khseer_"):
+
+        _, chat_id, target_id = data.split("_")
+
+        await kh_seer(
+            query,
+            chat_id,
+            target_id
+        )
+
+        return
+
+    if data.startswith("khdoctor_"):
+
+        _, chat_id, target_id = data.split("_")
+
+        await kh_doctor(
+            query,
+            chat_id,
+            target_id
+        )
+
+        return
+
+    if data.startswith("khvote_"):
+
+        _, chat_id, target_id = data.split("_")
+
+        await kh_vote(
+            query,
+            chat_id,
+            target_id
+        )
+
+        return
+
+    if data == "kharine_info":
+
+        await query.edit_message_text(
+            """
+🫏 خرینه
+
+👥 ۴ تا ۸ بازیکن
+
+🐺 خرینه‌ها
+🔮 فال‌خر
+🩺 خرپزشک
+👨‍🌾 خر‌دار
+
+🌙 شب
+☀️ روز
+🗳️ رأی‌گیری
+
+🏆 برد خرینه‌ها: +500 پوینت
+🏘️ برد اهالی: +300 پوینت
+
+برای شروع، داخل گروه بنویس:
+
+شروع خرینه
+"""
+        )
+
+        return
+
+
+# =========================================================
 # MESSAGE HANDLER
-# ==================================================
+# =========================================================
 
-async def message_handler(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def message_handler(update, context):
 
     if not update.message:
         return
@@ -955,7 +2135,9 @@ async def message_handler(
 
     text = text.strip().lower()
 
+    # -----------------------------
     # ARR
+    # -----------------------------
 
     if text in ARR_WORDS:
 
@@ -985,7 +2167,9 @@ async def message_handler(
 
         return
 
+    # -----------------------------
     # PERSIAN COMMANDS
+    # -----------------------------
 
     if text in {
         "پروفایل",
@@ -993,11 +2177,7 @@ async def message_handler(
         "امتیاز من"
     }:
 
-        await profile(
-            update,
-            context
-        )
-
+        await profile(update, context)
         return
 
     if text in {
@@ -1006,11 +2186,7 @@ async def message_handler(
         "پول"
     }:
 
-        await balance(
-            update,
-            context
-        )
-
+        await balance(update, context)
         return
 
     if text in {
@@ -1018,11 +2194,7 @@ async def message_handler(
         "جایزه روزانه"
     }:
 
-        await daily(
-            update,
-            context
-        )
-
+        await daily(update, context)
         return
 
     if text in {
@@ -1032,11 +2204,7 @@ async def message_handler(
         "رنک"
     }:
 
-        await leaderboard(
-            update,
-            context
-        )
-
+        await leaderboard(update, context)
         return
 
     if text in {
@@ -1045,37 +2213,64 @@ async def message_handler(
         "دستورات"
     }:
 
-        await help_command(
+        await help_command(update, context)
+        return
+
+    if text in {
+        "بازی",
+        "بازی ها",
+        "بازی‌ها"
+    }:
+
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "🪨📄✂️ سنگ کاغذ قیچی",
+                    callback_data="start_rps"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🫏 خرینه",
+                    callback_data="kharine_info"
+                )
+            ]
+        ]
+
+        await update.message.reply_text(
+            "🎮 بازی‌های خر‌بات:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+        return
+
+    # -----------------------------
+    # START KHARINE
+    # -----------------------------
+
+    if text in {
+        "شروع خرینه",
+        "خرینه",
+        "بازی خرینه"
+    }:
+
+        await start_kharine(
             update,
             context
         )
 
         return
 
-    if text in {
-        "بازی",
-        "بازی ها",
-        "بازی‌ها",
-        "سنگ کاغذ قیچی"
-    }:
 
-        await rps_menu(
-            update,
-            context
-        )
-
-
-# ==================================================
+# =========================================================
 # MAIN
-# ==================================================
+# =========================================================
 
 def main():
 
     if not TOKEN:
 
-        print(
-            "ERROR: BOT_TOKEN is missing!"
-        )
+        print("ERROR: BOT_TOKEN is missing!")
 
         return
 
@@ -1088,6 +2283,7 @@ def main():
         .build()
     )
 
+    # Commands
     app.add_handler(
         CommandHandler(
             "start",
@@ -1123,12 +2319,14 @@ def main():
         )
     )
 
+    # Buttons
     app.add_handler(
         CallbackQueryHandler(
             button_handler
         )
     )
 
+    # Persian text
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
