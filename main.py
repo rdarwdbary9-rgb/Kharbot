@@ -2,6 +2,7 @@ import os
 import sqlite3
 import time
 import random
+import tempfile
 from datetime import datetime
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -65,10 +66,11 @@ async def ask_ai(prompt: str) -> str:
         return "🫏 ای بابا، مخم هنگ کرد! چند لحظه دیگه دوباره بپرس."
 
 # =========================================================
-# DATABASE
+# DATABASE (Safe & Auto-managed)
 # =========================================================
 
-db = sqlite3.connect("kharbot.db", check_same_thread=False)
+db_path = os.path.join(tempfile.gettempdir(), "kharbot.db")
+db = sqlite3.connect(db_path, check_same_thread=False)
 cursor = db.cursor()
 
 cursor.execute("""
@@ -119,19 +121,10 @@ def create_user(user):
     today = datetime.now().strftime("%Y-%m-%d")
     cursor.execute("SELECT user_id, q_last_reset FROM users WHERE user_id = ?", (user.id,))
     row = cursor.fetchone()
-    
     if row is None:
-        cursor.execute(
-            "INSERT INTO users (user_id, username, first_name, q_last_reset) VALUES (?, ?, ?, ?)",
-            (user.id, user.username or "", user.first_name or "Player", today)
-        )
-    else:
-        cursor.execute("UPDATE users SET username = ?, first_name = ? WHERE user_id = ?", (user.username or "", user.first_name or "Player", user.id))
-        if row[1] != today:
-            cursor.execute(
-                "UPDATE users SET q_arr_count = 0, q_game_count = 0, q_ai_count = 0, q_last_reset = ? WHERE user_id = ?",
-                (today, user.id)
-            )
+        cursor.execute("INSERT INTO users (user_id, username, first_name, q_last_reset) VALUES (?, ?, ?, ?)", (user.id, user.username or "", user.first_name or "Player", today))
+    elif row[1] != today:
+        cursor.execute("UPDATE users SET q_arr_count = 0, q_game_count = 0, q_ai_count = 0, q_last_reset = ? WHERE user_id = ?", (today, user.id))
     db.commit()
 
 def get_score(user_id):
@@ -148,12 +141,9 @@ def remove_score(user_id, amount):
     db.commit()
 
 def update_quest(user_id, q_type):
-    if q_type == "arr":
-        cursor.execute("UPDATE users SET q_arr_count = q_arr_count + 1 WHERE user_id = ?", (user_id,))
-    elif q_type == "game":
-        cursor.execute("UPDATE users SET q_game_count = q_game_count + 1 WHERE user_id = ?", (user_id,))
-    elif q_type == "ai":
-        cursor.execute("UPDATE users SET q_ai_count = q_ai_count + 1 WHERE user_id = ?", (user_id,))
+    if q_type == "arr": cursor.execute("UPDATE users SET q_arr_count = q_arr_count + 1 WHERE user_id = ?", (user_id,))
+    elif q_type == "game": cursor.execute("UPDATE users SET q_game_count = q_game_count + 1 WHERE user_id = ?", (user_id,))
+    elif q_type == "ai": cursor.execute("UPDATE users SET q_ai_count = q_ai_count + 1 WHERE user_id = ?", (user_id,))
     db.commit()
 
 def set_pending_game(user_id, game_name):
@@ -166,7 +156,7 @@ def get_pending_game(user_id):
     return res[0] if res else ""
 
 # =========================================================
-# MENUS & STORE
+# MENUS
 # =========================================================
 
 def main_menu(user_id=0):
@@ -178,7 +168,6 @@ def main_menu(user_id=0):
     ]
     if user_id == ADMIN_ID and ADMIN_ID != 0:
         keyboard.append([InlineKeyboardButton("👑 پنل مدیریت مالک", callback_data="admin_panel")])
-        
     return InlineKeyboardMarkup(keyboard)
 
 STORE_ITEMS = {
@@ -188,8 +177,7 @@ STORE_ITEMS = {
     "item_luck": {"name": "🎲 کارت شانس", "price": 300, "type": "item", "val": "item_luck"},
     "item_boost": {"name": "⚡ طلسم دوبرابر کننده", "price": 800, "type": "item", "val": "item_boost"},
 }
-
-def store_menu():
+    def store_menu():
     keyboard = []
     for item_id, item in STORE_ITEMS.items():
         keyboard.append([InlineKeyboardButton(f"{item['name']} — {item['price']} 🫏", callback_data=f"buy_{item_id}")])
@@ -228,7 +216,7 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def give_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not update.message.reply_to_message:
-        await update.message.reply_text("❌ روی پیام شخص مورد نظر ریپلی کن و بنویس `/give 50` یا `بده 50`")
+        await update.message.reply_text("❌ روی پیام شخص مورد نظر ریپلی کن و بنویس `/give 50` یا `بده 50` ")
         return
 
     target_user = update.message.reply_to_message.from_user
@@ -276,8 +264,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 **راهنمای جامع خر‌بات**\n"
         "━━━━━━━━━━━━━━━\n"
         "🤖 **هوش مصنوعی:**\n"
-        "برای چت با هوش مصنوعی کافیست پیام خود را با کلمه **«خر»** شروع کنید.\n"
-        "مثال: `خر چطوری؟`\n\n"
+        "برای چت با هوش مصنوعی کافیست پیام خود را با کلمه **«خر»** شروع کنید.\n\n"
         "🎮 **بازی‌ها:**\n"
         "ارسال کلمات `انفجار` / `سنگ` / `دوز` / `خرینه`\n\n"
         "💰 **سیستم پوینت:**\n"
@@ -413,7 +400,8 @@ async def admin_remove_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ مقدار **{amount}** پوینت با موفقیت از آیدی `{target_id}` کم شد.")
     except Exception:
         await update.message.reply_text("❌ فرمت اشتباه است!\nمثال: `/removecoin 12345678 500`")
-        # =========================================================
+
+# =========================================================
 # 💥 CRASH GAME (انفجار)
 # =========================================================
 
@@ -559,6 +547,7 @@ async def play_rps_pvp_choice(query, game_id, choice):
 # =========================================================
 
 active_ttt_games = {}
+
 def check_ttt_winner(board):
     lines = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]]
     for a, b, c in lines:
@@ -676,7 +665,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not text: return
     clean_text = text.strip().lower()
 
-    # دریافت مبلغ بازی‌های معلق
     pending = get_pending_game(user.id)
     if pending:
         if clean_text.isdigit():
@@ -690,7 +678,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ مبلغ معتبر نبود. بازی لغو شد.")
             return
 
-    # دستور بده / give
     parts = clean_text.split()
     if parts[0] == "بده" and len(parts) > 1 and parts[1].isdigit():
         if update.message.reply_to_message:
@@ -698,7 +685,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await give_score(update, context)
         return
 
-    # بازی‌ها
     if clean_text == "انفجار":
         set_pending_game(user.id, "crash")
         await update.message.reply_text("💥 **بازی انفجار**\n\nلطفاً مبلغ شرط را ارسال کن:")
@@ -718,7 +704,6 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await start_kharine(update, context)
         return
 
-    # سیستم عر
     if clean_text in ARR_WORDS:
         if not can_get_arr_score(user.id):
             await update.message.reply_text("⏳ یکم صبر کن بعد دوباره عر بزن 😂")
@@ -728,14 +713,12 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🫏 عر زدی، پوینت گرفتی!\n+{ARR_SCORE} 🫏 پوینت")
         return
 
-    # دستورات منو
     if clean_text in {"فروشگاه", "خرید"}: await show_store(update, context); return
     if clean_text in {"پروفایل", "امتیاز"}: await profile(update, context); return
     if clean_text in {"ماموریت", "ماموریت ها"}: await show_quests(update, context); return
     if clean_text in {"انبار", "کیف پول"}: await show_inventory(update, context); return
     if clean_text in {"راهنما", "کمک"}: await help_command(update, context); return
 
-    # هوش مصنوعی
     if clean_text.startswith("خر ") or clean_text == "خر":
         prompt_text = "سلام خر!" if clean_text == "خر" else text[2:].strip()
         await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -830,7 +813,6 @@ def main():
     print("KHARBOT STARTING...")
     app = Application.builder().token(TOKEN).build()
 
-    # عمومی
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("profile", profile))
     app.add_handler(CommandHandler("give", give_score))
@@ -840,7 +822,6 @@ def main():
     app.add_handler(CommandHandler("daily", daily))
     app.add_handler(CommandHandler("help", help_command))
 
-    # مالک / Admin
     app.add_handler(CommandHandler("admin", admin_panel))
     app.add_handler(CommandHandler("addcoin", admin_add_coin))
     app.add_handler(CommandHandler("removecoin", admin_remove_coin))
