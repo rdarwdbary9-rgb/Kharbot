@@ -66,7 +66,7 @@ async def ask_ai(prompt: str) -> str:
         return "🫏 ای بابا، مخم هنگ کرد! چند لحظه دیگه دوباره بپرس."
 
 # =========================================================
-# DATABASE (Safe & Auto-managed)
+# DATABASE
 # =========================================================
 
 db_path = os.path.join(tempfile.gettempdir(), "kharbot.db")
@@ -156,7 +156,7 @@ def get_pending_game(user_id):
     return res[0] if res else ""
 
 # =========================================================
-# MENUS
+# MENUS & STORE
 # =========================================================
 
 def main_menu(user_id=0):
@@ -177,7 +177,8 @@ STORE_ITEMS = {
     "item_luck": {"name": "🎲 کارت شانس", "price": 300, "type": "item", "val": "item_luck"},
     "item_boost": {"name": "⚡ طلسم دوبرابر کننده", "price": 800, "type": "item", "val": "item_boost"},
 }
-    def store_menu():
+
+def store_menu():
     keyboard = []
     for item_id, item in STORE_ITEMS.items():
         keyboard.append([InlineKeyboardButton(f"{item['name']} — {item['price']} 🫏", callback_data=f"buy_{item_id}")])
@@ -353,8 +354,6 @@ async def buy_item(query, item_id):
 
     await query.edit_message_text(f"🎉 خرید انجام شد! موجودی جدید: **{get_score(user.id)}** 🫏", reply_markup=store_menu())
 
-# --- دستورات مالکان ---
-
 async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or user.id != ADMIN_ID:
@@ -400,8 +399,7 @@ async def admin_remove_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ مقدار **{amount}** پوینت با موفقیت از آیدی `{target_id}` کم شد.")
     except Exception:
         await update.message.reply_text("❌ فرمت اشتباه است!\nمثال: `/removecoin 12345678 500`")
-
-# =========================================================
+        # =========================================================
 # 💥 CRASH GAME (انفجار)
 # =========================================================
 
