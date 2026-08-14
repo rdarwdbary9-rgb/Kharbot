@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-# ============================================================
-# خر بات پرو - نسخه کامل فارسی
-# ============================================================
-
 import os
 import time
 import random
@@ -13,10 +9,9 @@ import logging
 import json
 from contextlib import closing
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
+from telegram.ext import Application, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
 # ============================================================
 # تنظیمات اولیه
@@ -24,7 +19,7 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Mess
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-DB_FILE = "/tmp/kharbot.db"
+DB_FILE = "kharbot.db"
 MIN_BET = 10
 START_COINS = 2500
 MAX_PLAYERS = 10
@@ -233,9 +228,10 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining = DAILY_COOLDOWN - (now - last_daily)
         hours = remaining // 3600
         minutes = (remaining % 3600) // 60
-        return await update.message.reply_text(
+        await update.message.reply_text(
             f"⏳ {hours} ساعت و {minutes} دقیقه مونده تا جایزه روزانه بعدی!"
         )
+        return
     
     reward = random.randint(DAILY_MIN, DAILY_MAX)
     bonus = ""
@@ -289,9 +285,10 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
         remaining = SOUND_COOLDOWN - (now - last_sound)
         minutes = remaining // 60
         seconds = remaining % 60
-        return await update.message.reply_text(
+        await update.message.reply_text(
             f"⏳ {minutes} دقیقه و {seconds} ثانیه صبر کن تا دوباره صدا بدی! 🐴"
         )
+        return
     
     keyword = None
     for key in SOUND_KEYWORDS.keys():
@@ -341,46 +338,56 @@ async def mate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ensure_user(user.id, user.first_name)
     
     if not update.message.reply_to_message:
-        return await update.message.reply_text(
+        await update.message.reply_text(
             "❌ روی پیام شخص مورد نظر **ریپلی (Reply)** بزن و سپس `جفت‌گیری` رو تایپ کن."
         )
+        return
     
     target = update.message.reply_to_message.from_user
     target_id = target.id
     
     if user.id == target_id:
-        return await update.message.reply_text("❌ نمی‌تونی با خودت جفت‌گیری کنی! 😂")
+        await update.message.reply_text("❌ نمی‌تونی با خودت جفت‌گیری کنی! 😂")
+        return
     
     ensure_user(target_id, target.first_name)
     u1 = get_user(user.id)
     u2 = get_user(target_id)
     
     if u1["level"] < 2:
-        return await update.message.reply_text(f"❌ {user.first_name} عزیز، سطح تو {u1['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسی! 🐣")
+        await update.message.reply_text(f"❌ {user.first_name} عزیز، سطح تو {u1['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسی! 🐣")
+        return
     
     if u2["level"] < 2:
-        return await update.message.reply_text(f"❌ {target.first_name} عزیز، سطحش {u2['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسه! 🐣")
+        await update.message.reply_text(f"❌ {target.first_name} عزیز، سطحش {u2['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسه! 🐣")
+        return
     
     if u1["coins"] < MATE_COST:
-        return await update.message.reply_text(f"❌ {user.first_name} {MATE_COST} {CURRENCY_NAME} نداری! 💸")
+        await update.message.reply_text(f"❌ {user.first_name} {MATE_COST} {CURRENCY_NAME} نداری! 💸")
+        return
     if u2["coins"] < MATE_COST:
-        return await update.message.reply_text(f"❌ {target.first_name} {MATE_COST} {CURRENCY_NAME} نداره! 💸")
+        await update.message.reply_text(f"❌ {target.first_name} {MATE_COST} {CURRENCY_NAME} نداره! 💸")
+        return
     
     babies1 = json.loads(u1["baby_names"]) if u1["baby_names"] else []
     babies2 = json.loads(u2["baby_names"]) if u2["baby_names"] else []
     
     if len(babies1) >= MAX_BABIES:
-        return await update.message.reply_text(f"❌ {user.first_name} دیگه جا برای کره‌خر جدید نداری! (حداکثر {MAX_BABIES})")
+        await update.message.reply_text(f"❌ {user.first_name} دیگه جا برای کره‌خر جدید نداری! (حداکثر {MAX_BABIES})")
+        return
     if len(babies2) >= MAX_BABIES:
-        return await update.message.reply_text(f"❌ {target.first_name} دیگه جا برای کره‌خر جدید نداره! (حداکثر {MAX_BABIES})")
+        await update.message.reply_text(f"❌ {target.first_name} دیگه جا برای کره‌خر جدید نداره! (حداکثر {MAX_BABIES})")
+        return
     
     now = int(time.time())
     if now - u1["last_mate"] < MATE_COOLDOWN:
         remaining = (MATE_COOLDOWN - (now - u1["last_mate"])) // 3600
-        return await update.message.reply_text(f"⏳ {user.first_name} عزیز، {remaining} ساعت دیگه می‌تونی جفت‌گیری کنی!")
+        await update.message.reply_text(f"⏳ {user.first_name} عزیز، {remaining} ساعت دیگه می‌تونی جفت‌گیری کنی!")
+        return
     if now - u2["last_mate"] < MATE_COOLDOWN:
         remaining = (MATE_COOLDOWN - (now - u2["last_mate"])) // 3600
-        return await update.message.reply_text(f"⏳ {target.first_name} عزیز، {remaining} ساعت دیگه می‌تونه جفت‌گیری کنه!")
+        await update.message.reply_text(f"⏳ {target.first_name} عزیز، {remaining} ساعت دیگه می‌تونه جفت‌گیری کنه!")
+        return
     
     remove_coins(user.id, MATE_COST)
     remove_coins(target_id, MATE_COST)
@@ -433,18 +440,6 @@ GAME_MAX_PLAYERS = {
     "roulette": 10
 }
 
-GAME_HANDLERS = {}
-
-async def game_placeholder(room, context):
-    await context.bot.edit_message_text(
-        "🎮 این بازی در حال توسعه است!",
-        chat_id=room.chat_id,
-        message_id=room.message_id
-    )
-
-for game in GAME_NAMES.keys():
-    GAME_HANDLERS[game] = game_placeholder
-
 # ============================================================
 # مدیریت اتاق‌ها
 # ============================================================
@@ -465,6 +460,14 @@ class GameRoom:
     game_data: dict = field(default_factory=dict)
     message_id: int = 0
     created_at: float = field(default_factory=time.time)
+
+    def add_player(self, user_id: int) -> bool:
+        if len(self.players) >= self.max_players:
+            return False
+        if user_id in self.players:
+            return False
+        self.players.append(user_id)
+        return True
 
 def get_room(room_id: str):
     return ACTIVE_ROOMS.get(room_id)
@@ -489,6 +492,35 @@ def create_room(chat_id: int, game_type: str, creator_id: int, bet: int) -> Game
     ACTIVE_ROOMS[room_id] = room
     PLAYER_IN_GAME[creator_id] = room_id
     return room
+
+async def show_room_status(room: GameRoom, context: ContextTypes.DEFAULT_TYPE, query=None):
+    """نمایش وضعیت اتاق"""
+    names = []
+    for p in room.players:
+        u = get_user(p)
+        names.append(f"{len(names)+1}. {u['name'] if u else 'ناشناس'}")
+    
+    text = (
+        f"🎮 **{GAME_NAMES[room.game_type]}**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"💰 شرط: {room.bet} {CURRENCY_NAME}\n"
+        f"👥 بازیکنان ({len(room.players)}/{room.max_players}):\n"
+        f"{chr(10).join(names)}\n"
+    )
+    
+    if not room.started:
+        text += "\n⏳ منتظر ورود بازیکنان..."
+    
+    if query:
+        await query.edit_message_text(text, reply_markup=room_control_keyboard(room), parse_mode="Markdown")
+    else:
+        await context.bot.edit_message_text(
+            text,
+            chat_id=room.chat_id,
+            message_id=room.message_id,
+            reply_markup=room_control_keyboard(room),
+            parse_mode="Markdown"
+        )
 
 # ============================================================
 # دکمه‌ها
@@ -519,6 +551,16 @@ def shop_keyboard():
         [InlineKeyboardButton("🎀 اکسسوری‌ها", callback_data="shop_accessories")],
         [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ])
+
+def room_control_keyboard(room: GameRoom):
+    buttons = []
+    if not room.started:
+        if len(room.players) < room.max_players:
+            buttons.append([InlineKeyboardButton("👥 ورود به بازی", callback_data=f"room_join_{room.room_id}")])
+        if len(room.players) >= 2:
+            buttons.append([InlineKeyboardButton("▶️ شروع بازی", callback_data=f"room_start_{room.room_id}")])
+        buttons.append([InlineKeyboardButton("❌ لغو", callback_data=f"room_cancel_{room.room_id}")])
+    return InlineKeyboardMarkup(buttons)
 
 # ============================================================
 # اطلاعات فروشگاه
@@ -596,7 +638,51 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     u_data = get_user(user.id)
     if u_data and u_data["is_banned"] == 1:
-        return await update.message.reply_text("🚫 شما بن شده‌اید!")
+        await update.message.reply_text("🚫 شما بن شده‌اید!")
+        return
+    
+    # ===== دریافت شرط =====
+    if context.user_data.get("awaiting_bet"):
+        if text.isdigit():
+            bet = int(text)
+            if bet < MIN_BET:
+                await update.message.reply_text(f"❌ حداقل شرط {MIN_BET} {CURRENCY_NAME} است!")
+                return
+            
+            u = get_user(user.id)
+            if u["coins"] < bet:
+                await update.message.reply_text(f"❌ پول کافی ندارید! موجودی: {u['coins']:,} {CURRENCY_NAME}")
+                return
+            
+            game_type = context.user_data.get("temp_game")
+            if not game_type:
+                await update.message.reply_text("❌ خطا! دوباره از منو بازی رو انتخاب کن.")
+                return
+            
+            remove_coins(user.id, bet)
+            room = create_room(update.effective_chat.id, game_type, user.id, bet)
+            
+            msg_text = (
+                f"🎮 **{GAME_NAMES[game_type]}**\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💰 شرط: {bet} {CURRENCY_NAME}\n"
+                f"👥 بازیکنان: 1/{GAME_MAX_PLAYERS[game_type]}\n"
+                f"\n🔄 منتظر ورود بازیکنان دیگر..."
+            )
+            
+            sent_msg = await update.message.reply_text(
+                msg_text,
+                reply_markup=room_control_keyboard(room),
+                parse_mode="Markdown"
+            )
+            room.message_id = sent_msg.message_id
+            
+            context.user_data["awaiting_bet"] = False
+            context.user_data["temp_game"] = None
+            
+        else:
+            await update.message.reply_text("❌ لطفاً یک عدد معتبر وارد کنید!")
+        return
     
     # ===== دستورات ادمین =====
     if user.id == OWNER_ID and update.message.reply_to_message:
@@ -618,7 +704,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db.commit()
             await update.message.reply_text(f"✅ {target.first_name} آنبن شد!")
             return
-        if cmd in ["/addcoin", "+سکه"] and len(parts) > 1:
+        if cmd in ["/addcoin", "سکه", "+سکه"] and len(parts) > 1:
             try:
                 amt = int(parts[1])
                 add_coins(target.id, amt)
@@ -626,7 +712,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except:
                 pass
             return
-        if cmd in ["/remcoin", "-سکه"] and len(parts) > 1:
+        if cmd in ["/remcoin", "کسر", "-سکه"] and len(parts) > 1:
             try:
                 amt = int(parts[1])
                 with closing(db_connect()) as db:
@@ -639,7 +725,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== شروع =====
     if text.startswith("/start"):
-        return await update.message.reply_text(
+        await update.message.reply_text(
             "🫏 **به طویله خرستان خوش آمدید!**\n\n"
             "با ربات ما می‌توانید:\n"
             "• 🎮 ۷ بازی مختلف انجام دهید\n"
@@ -652,6 +738,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=main_menu(),
             parse_mode="Markdown"
         )
+        return
     
     # ===== جایزه روزانه =====
     if text in ["روزانه", "daily", "جایزه روزانه"]:
@@ -670,20 +757,22 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_id = target.id
         else:
             target_id = user.id
-        return await update.message.reply_text(
+        await update.message.reply_text(
             profile_text(target_id),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
             parse_mode="Markdown"
         )
+        return
     
     # ===== سکه =====
     if text in ["سکه", "coins", "تی‌تاپ"]:
         u = get_user(user.id)
-        return await update.message.reply_text(
+        await update.message.reply_text(
             f"💰 **موجودی شما:** {u['coins']:,} {CURRENCY_NAME}",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
             parse_mode="Markdown"
         )
+        return
     
     # ===== جدول =====
     if text in ["جدول", "ج", "leaderboard", "top"]:
@@ -693,7 +782,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ).fetchall()
         
         if not rows:
-            return await update.message.reply_text("❌ هنوز کسی ثبت نشده!")
+            await update.message.reply_text("❌ هنوز کسی ثبت نشده!")
+            return
         
         msg = "🏆 **جدول ثروتمندان طویله**\n━━━━━━━━━━━━━━━━\n"
         for i, row in enumerate(rows, 1):
@@ -709,7 +799,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_row and user_row["rank"]:
             msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
         
-        return await update.message.reply_text(msg, parse_mode="Markdown")
+        await update.message.reply_text(msg, parse_mode="Markdown")
+        return
     
     # ===== صدای خر =====
     if text in ["عر", "عرعر", "عرر", "ترک", "تورک"]:
@@ -728,25 +819,28 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     u_data = get_user(user.id)
     if u_data and u_data["is_banned"] == 1:
-        return await query.edit_message_text("🚫 شما بن شده‌اید!")
+        await query.edit_message_text("🚫 شما بن شده‌اید!")
+        return
     
     data = query.data
     
     # ===== خانه =====
     if data == "home":
-        return await query.edit_message_text(
+        await query.edit_message_text(
             "🏠 **منوی اصلی طویله**",
             reply_markup=main_menu(),
             parse_mode="Markdown"
         )
+        return
     
     # ===== لیست بازی‌ها =====
     if data == "games_list":
-        return await query.edit_message_text(
+        await query.edit_message_text(
             "🎮 **انتخاب بازی:**",
             reply_markup=games_menu(),
             parse_mode="Markdown"
         )
+        return
     
     # ===== انتخاب بازی =====
     if data.startswith("game_"):
@@ -755,7 +849,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         if user.id in PLAYER_IN_GAME:
-            return await query.answer("⚠️ شما در یک بازی دیگر هستید!", show_alert=True)
+            await query.answer("⚠️ شما در یک بازی دیگر هستید!", show_alert=True)
+            return
         
         context.user_data["temp_game"] = game_type
         context.user_data["awaiting_bet"] = True
@@ -769,16 +864,83 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data="games_list")]]),
             parse_mode="Markdown"
         )
-        context.user_data["awaiting_bet"] = True
+        return
+    
+    # ===== ورود به اتاق =====
+    if data.startswith("room_join_"):
+        room_id = data[10:]
+        room = get_room(room_id)
+        if not room:
+            await query.answer("❌ اتاق وجود ندارد!", show_alert=True)
+            return
+        if room.started:
+            await query.answer("❌ بازی شروع شده!", show_alert=True)
+            return
+        if user.id in room.players:
+            await query.answer("✅ شما قبلاً در اتاق هستید!", show_alert=True)
+            return
+        if len(room.players) >= room.max_players:
+            await query.answer("❌ ظرفیت پر است!", show_alert=True)
+            return
+        
+        if not remove_coins(user.id, room.bet):
+            await query.answer(f"❌ شما {room.bet} {CURRENCY_NAME} ندارید!", show_alert=True)
+            return
+        
+        room.add_player(user.id)
+        PLAYER_IN_GAME[user.id] = room_id
+        
+        await show_room_status(room, context, query)
+        return
+    
+    # ===== شروع بازی =====
+    if data.startswith("room_start_"):
+        room_id = data[11:]
+        room = get_room(room_id)
+        if not room:
+            await query.answer("❌ اتاق وجود ندارد!", show_alert=True)
+            return
+        if room.creator_id != user.id:
+            await query.answer("❌ فقط سازنده اتاق می‌تواند شروع کند!", show_alert=True)
+            return
+        if len(room.players) < 2:
+            await query.answer("❌ حداقل ۲ بازیکن نیاز است!", show_alert=True)
+            return
+        if room.started:
+            return
+        
+        room.started = True
+        await query.edit_message_text("🎮 بازی شروع شد! (در حال توسعه...)")
+        cleanup_room(room_id)
+        return
+    
+    # ===== لغو اتاق =====
+    if data.startswith("room_cancel_"):
+        room_id = data[12:]
+        room = get_room(room_id)
+        if not room:
+            await query.answer("❌ اتاق وجود ندارد!", show_alert=True)
+            return
+        if room.creator_id != user.id:
+            await query.answer("❌ فقط سازنده اتاق می‌تواند لغو کند!", show_alert=True)
+            return
+        
+        for p in room.players:
+            add_coins(p, room.bet)
+            PLAYER_IN_GAME.pop(p, None)
+        
+        ACTIVE_ROOMS.pop(room_id, None)
+        await query.edit_message_text("❌ اتاق لغو شد.", reply_markup=main_menu())
         return
     
     # ===== پروفایل =====
     if data == "show_profile":
-        return await query.edit_message_text(
+        await query.edit_message_text(
             profile_text(user.id),
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
             parse_mode="Markdown"
         )
+        return
     
     # ===== جدول =====
     if data == "leaderboard":
@@ -788,7 +950,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ).fetchall()
         
         if not rows:
-            return await query.edit_message_text("❌ هنوز کسی ثبت نشده!")
+            await query.edit_message_text("❌ هنوز کسی ثبت نشده!")
+            return
         
         msg = "🏆 **جدول ثروتمندان طویله**\n━━━━━━━━━━━━━━━━\n"
         for i, row in enumerate(rows, 1):
@@ -804,19 +967,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_row and user_row["rank"]:
             msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
         
-        return await query.edit_message_text(
+        await query.edit_message_text(
             msg,
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
             parse_mode="Markdown"
         )
+        return
     
     # ===== فروشگاه =====
     if data == "shop":
-        return await query.edit_message_text(
+        await query.edit_message_text(
             "🏪 **فروشگاه طویله**\nانتخاب کنید:",
             reply_markup=shop_keyboard(),
             parse_mode="Markdown"
         )
+        return
     
     # ===== دسته‌بندی فروشگاه =====
     if data.startswith("shop_"):
@@ -833,11 +998,12 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )])
         buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="shop")])
         
-        return await query.edit_message_text(
+        await query.edit_message_text(
             f"🏪 **{cat_data['name']}**\nانتخاب کنید:",
             reply_markup=InlineKeyboardMarkup(buttons),
             parse_mode="Markdown"
         )
+        return
     
     # ===== خرید =====
     if data.startswith("buy_"):
@@ -856,11 +1022,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price = item_data["price"]
         
         if not remove_coins(user.id, price):
-            return await query.answer(f"❌ {price:,} {CURRENCY_NAME} ندارید!", show_alert=True)
+            await query.answer(f"❌ {price:,} {CURRENCY_NAME} ندارید!", show_alert=True)
+            return
         
         donkey = get_donkey(user.id)
         if not donkey:
-            return await query.answer("❌ خر شما وجود ندارد!", show_alert=True)
+            await query.answer("❌ خر شما وجود ندارد!", show_alert=True)
+            return
         
         col_map = {
             "hats": "equipped_hat",
