@@ -1,5 +1,5 @@
 # ============================================================
-# KHARBOT PRO - FINAL MASTER VERSION (WITH REPLY ADMIN CMD)
+# KHARBOT PRO - FINAL MASTER VERSION (BUG FIXED)
 # ============================================================
 
 import os
@@ -433,7 +433,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # --- چک کردن بن بودن ---
     u_data = get_user(user.id)
-    if u_data and u_data.get("is_banned", 0) == 1:
+    if u_data and u_data["is_banned"] == 1:
         await query.edit_message_text("🚫 **عرعــــر!** شما به دلیل جفتک‌اندازی زیاد از طویله اخراج (بن) شده‌اید!")
         return
         
@@ -696,7 +696,7 @@ async def general_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     ensure_user(user.id, user.first_name)
 
     u_data = get_user(user.id)
-    if u_data and u_data.get("is_banned", 0) == 1:
+    if u_data and u_data["is_banned"] == 1:
         await update.message.reply_text("🚫 **عرعــــر!** شما به دلیل رفتار نامناسب از طویله اخراج (بن) شده‌اید! دیگه هویج بی‌هویج 🥕")
         return
 
@@ -705,8 +705,6 @@ async def general_text_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     # ==========================================
     if user.id == OWNER_ID and text.startswith(("/", "بن", "انبن", "سکه", "کسر", "+سکه", "-سکه")):
         if not update.message.reply_to_message:
-            # اگه کامند ادمینی زد ولی رو پیامی ریپلی نکرد
-            # ممکنه دستور ربات (مثل /start) باشه، پس فقط اگر کامند اختصاصی ادمین بود هشدار بده
             parts = text.split()
             cmd = parts[0].lower()
             if cmd in ["/ban", "بن", "/unban", "انبن", "/addcoin", "سکه", "+سکه", "/remcoin", "کسر", "-سکه"]:
