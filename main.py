@@ -1,14 +1,12 @@
-============================================================
-KHARBOT PRO - ULTIMATE VERSION (CLEAN)
-============================================================
+# ============================================================
+# KHARBOT PRO - ULTIMATE VERSION (CLEAN)
+# ============================================================
 
 import os
 import time
 import random
 import sqlite3
 import logging
-import asyncio
-import itertools
 import json
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -17,9 +15,9 @@ from typing import Dict, List, Optional
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
-============================================================
-CONFIG & LOGGING
-============================================================
+# ============================================================
+# CONFIG & LOGGING
+# ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
@@ -28,15 +26,15 @@ MIN_BET = 10
 START_COINS = 2500
 MAX_PLAYERS = 10
 
-CURRENCY_NAME = "تي تاپ"
+CURRENCY_NAME = "T-Top"
 CURRENCY_EMOJI = ""
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger("KHARBOT")
 
-============================================================
-DATABASE SETUP
-============================================================
+# ============================================================
+# DATABASE SETUP
+# ============================================================
 
 def db_connect():
     db = sqlite3.connect(DB_FILE, timeout=20)
@@ -71,9 +69,9 @@ def init_db():
             FOREIGN KEY(user_id) REFERENCES users(user_id))""")
         db.commit()
 
-============================================================
-USER MANAGEMENT
-============================================================
+# ============================================================
+# USER MANAGEMENT
+# ============================================================
 
 def ensure_user(user_id, name="Player"):
     now = int(time.time())
@@ -144,9 +142,9 @@ def update_level(user_id):
         db.execute("UPDATE users SET level = ? WHERE user_id = ?", (level, user_id))
         db.commit()
 
-============================================================
-TITLE SYSTEM
-============================================================
+# ============================================================
+# TITLE SYSTEM
+# ============================================================
 
 def get_title_by_level(level):
     titles = {
@@ -163,9 +161,9 @@ def get_title_by_level(level):
     }
     return titles.get(level, "korekhar tazehkar")
 
-============================================================
-PROFILE
-============================================================
+# ============================================================
+# PROFILE
+# ============================================================
 
 def profile_text(user_id):
     u = get_user(user_id)
@@ -213,9 +211,9 @@ def profile_text(user_id):
     
     return msg
 
-============================================================
-DAILY REWARD
-============================================================
+# ============================================================
+# DAILY REWARD
+# ============================================================
 
 DAILY_COOLDOWN = 86400
 DAILY_MIN = 100
@@ -259,9 +257,9 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"\nCome back tomorrow!"
     )
 
-============================================================
-DONKEY SOUND SYSTEM
-============================================================
+# ============================================================
+# DONKEY SOUND SYSTEM
+# ============================================================
 
 SOUND_KEYWORDS = {
     "ar": {"sound": "ar ar ar", "desc": "Normal donkey sound"},
@@ -327,9 +325,9 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{bonus}"
     )
 
-============================================================
-MATING SYSTEM
-============================================================
+# ============================================================
+# MATING SYSTEM
+# ============================================================
 
 MATE_COST = 500
 MAX_BABIES = 5
@@ -407,9 +405,9 @@ async def mate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Cost: {MATE_COST} T-Top each"
     )
 
-============================================================
-GAME NAMES
-============================================================
+# ============================================================
+# GAME NAMES
+# ============================================================
 
 GAME_NAMES = {
     "rps": "Rock-Paper-Scissors",
@@ -443,9 +441,9 @@ async def game_placeholder(room, context):
 for game in GAME_NAMES.keys():
     GAME_HANDLERS[game] = game_placeholder
 
-============================================================
-ROOM MANAGEMENT
-============================================================
+# ============================================================
+# ROOM MANAGEMENT
+# ============================================================
 
 ACTIVE_ROOMS = {}
 PLAYER_IN_GAME = {}
@@ -488,9 +486,9 @@ def create_room(chat_id: int, game_type: str, creator_id: int, bet: int) -> Game
     PLAYER_IN_GAME[creator_id] = room_id
     return room
 
-============================================================
-UI COMPONENTS
-============================================================
+# ============================================================
+# UI COMPONENTS
+# ============================================================
 
 def main_menu():
     return InlineKeyboardMarkup([
@@ -518,9 +516,9 @@ def shop_keyboard():
         [InlineKeyboardButton("Back", callback_data="home")]
     ])
 
-============================================================
-SHOP DATA
-============================================================
+# ============================================================
+# SHOP DATA
+# ============================================================
 
 SHOP_ITEMS = {
     "hats": {
@@ -583,9 +581,9 @@ SHOP_ITEMS = {
     }
 }
 
-============================================================
-MESSAGE HANDLER
-============================================================
+# ============================================================
+# MESSAGE HANDLER
+# ============================================================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -711,9 +709,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await donkey_sound(update, context)
         return
 
-============================================================
-CALLBACK HANDLER
-============================================================
+# ============================================================
+# CALLBACK HANDLER
+# ============================================================
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -873,9 +871,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-============================================================
-MAIN
-============================================================
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
     if not BOT_TOKEN:
