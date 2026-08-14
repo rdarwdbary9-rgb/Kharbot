@@ -1,5 +1,8 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 # ============================================================
-# KHARBOT PRO - ULTIMATE VERSION (CLEAN)
+# خر بات پرو - نسخه کامل فارسی
 # ============================================================
 
 import os
@@ -16,7 +19,7 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
 # ============================================================
-# CONFIG & LOGGING
+# تنظیمات اولیه
 # ============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -26,14 +29,13 @@ MIN_BET = 10
 START_COINS = 2500
 MAX_PLAYERS = 10
 
-CURRENCY_NAME = "T-Top"
-CURRENCY_EMOJI = ""
+CURRENCY_NAME = "تی‌تاپ"
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger("KHARBOT")
 
 # ============================================================
-# DATABASE SETUP
+# دیتابیس
 # ============================================================
 
 def db_connect():
@@ -70,10 +72,10 @@ def init_db():
         db.commit()
 
 # ============================================================
-# USER MANAGEMENT
+# مدیریت کاربران
 # ============================================================
 
-def ensure_user(user_id, name="Player"):
+def ensure_user(user_id, name="کاربر"):
     now = int(time.time())
     with closing(db_connect()) as db:
         row = db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
@@ -143,32 +145,32 @@ def update_level(user_id):
         db.commit()
 
 # ============================================================
-# TITLE SYSTEM
+# سیستم لقب‌ها
 # ============================================================
 
 def get_title_by_level(level):
     titles = {
-        1: "korekhar tazehkar",
-        2: "khar karamoz",
-        3: "khar maher",
-        4: "khar horfei",
-        5: "khar ostad",
-        6: "takshakh afsanei",
-        7: "ejdehaye zarin",
-        8: "khar setarei",
-        9: "khar kahkeshani",
-        10: "khoda kharha"
+        1: "🐣 کره‌خر تازه‌کار",
+        2: "🐴 خر کارآموز",
+        3: "🐴 خر ماهر",
+        4: "🐴 خر حرفه‌ای",
+        5: "🐴 خر استاد",
+        6: "🦄 تک‌شاخ افسانه‌ای",
+        7: "🐉 اژدهای زرین",
+        8: "🌟 خر ستاره‌ای",
+        9: "☀️ خر کهکشانی",
+        10: "👑 خدا خرها"
     }
-    return titles.get(level, "korekhar tazehkar")
+    return titles.get(level, "🐣 کره‌خر تازه‌کار")
 
 # ============================================================
-# PROFILE
+# پروفایل
 # ============================================================
 
 def profile_text(user_id):
     u = get_user(user_id)
     if not u:
-        return "Error: User not found."
+        return "❌ کاربر پیدا نشد."
     
     level = u["level"]
     title = get_title_by_level(level)
@@ -177,42 +179,41 @@ def profile_text(user_id):
     
     equipped_parts = []
     if donkey:
-        if donkey["equipped_hat"]: equipped_parts.append("Hat: " + donkey["equipped_hat"])
-        if donkey["equipped_saddle"]: equipped_parts.append("Saddle: " + donkey["equipped_saddle"])
-        if donkey["equipped_horseshoe"]: equipped_parts.append("Horseshoe: " + donkey["equipped_horseshoe"])
-        if donkey["equipped_tie"]: equipped_parts.append("Tie: " + donkey["equipped_tie"])
-        if donkey["equipped_clothes"]: equipped_parts.append("Clothes: " + donkey["equipped_clothes"])
-        if donkey["equipped_accessory"]: equipped_parts.append("Accessory: " + donkey["equipped_accessory"])
+        if donkey["equipped_hat"]: equipped_parts.append("🎩 " + donkey["equipped_hat"])
+        if donkey["equipped_saddle"]: equipped_parts.append("🐴 " + donkey["equipped_saddle"])
+        if donkey["equipped_horseshoe"]: equipped_parts.append("👟 " + donkey["equipped_horseshoe"])
+        if donkey["equipped_tie"]: equipped_parts.append("👔 " + donkey["equipped_tie"])
+        if donkey["equipped_clothes"]: equipped_parts.append("👕 " + donkey["equipped_clothes"])
+        if donkey["equipped_accessory"]: equipped_parts.append("🎀 " + donkey["equipped_accessory"])
     
     msg = (
-        f"Profile of {u['name']}\n"
-        f"========================\n"
-        f"Title: {title}\n"
-        f"Level: {level}\n"
-        f"T-Top: {u['coins']:,}\n"
-        f"Wins: {u['wins']} | Losses: {u['losses']}\n"
+        f"{title} 👤 **پروفایل {u['name']}**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"⭐ سطح: {level}\n"
+        f"🪙 {CURRENCY_NAME}: {u['coins']:,}\n"
+        f"🏆 برد: {u['wins']} | 💀 باخت: {u['losses']}\n"
     )
     
     if equipped_parts:
-        msg += f"\nActive Items:\n"
+        msg += f"\n🎀 **وسایل فعال:**\n"
         for part in equipped_parts:
             msg += f"{part}\n"
     else:
-        msg += f"\nActive Items: None"
+        msg += f"\n🎀 **وسایل فعال:** هیچ"
     
     if babies:
-        msg += f"\nBabies: {len(babies)}\n"
+        msg += f"\n👶 **کره‌خرها:** {len(babies)} عدد\n"
         for i, baby in enumerate(babies[:3], 1):
             msg += f"{i}. {baby}\n"
         if len(babies) > 3:
-            msg += f"... and {len(babies)-3} more"
+            msg += f"... و {len(babies)-3} عدد دیگر"
     else:
-        msg += f"\nBabies: None"
+        msg += f"\n👶 **کره‌خرها:** هیچ"
     
     return msg
 
 # ============================================================
-# DAILY REWARD
+# جایزه روزانه
 # ============================================================
 
 DAILY_COOLDOWN = 86400
@@ -233,7 +234,7 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         hours = remaining // 3600
         minutes = (remaining % 3600) // 60
         return await update.message.reply_text(
-            f"{hours} hours and {minutes} minutes left for next daily reward!"
+            f"⏳ {hours} ساعت و {minutes} دقیقه مونده تا جایزه روزانه بعدی!"
         )
     
     reward = random.randint(DAILY_MIN, DAILY_MAX)
@@ -241,7 +242,7 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if random.random() < 0.10:
         extra = random.randint(50, 200)
         reward += extra
-        bonus = f"\nSpecial Reward! +{extra} T-Top"
+        bonus = f"\n🎉 **جایزه ویژه!** +{extra} {CURRENCY_NAME}"
     
     add_coins(user.id, reward)
     with closing(db_connect()) as db:
@@ -249,24 +250,25 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.commit()
     
     await update.message.reply_text(
-        f"Daily Reward!\n"
-        f"========================\n"
-        f"{user.first_name}\n"
-        f"Reward: {reward} T-Top"
+        f"🎁 **جایزه روزانه!**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👤 {user.first_name} عزیز\n"
+        f"💰 جایزه: **{reward}** {CURRENCY_NAME}"
         f"{bonus}\n"
-        f"\nCome back tomorrow!"
+        f"\n📅 فردا دوباره بیا! 🐴",
+        parse_mode="Markdown"
     )
 
 # ============================================================
-# DONKEY SOUND SYSTEM
+# صدای خر
 # ============================================================
 
 SOUND_KEYWORDS = {
-    "ar": {"sound": "ar ar ar", "desc": "Normal donkey sound"},
-    "arar": {"sound": "ar ar ar ar", "desc": "Repeated sound"},
-    "arr": {"sound": "arrrrrrr", "desc": "Long sound"},
-    "trak": {"sound": "ar-ar-ar-ar (Trak!)", "desc": "Broken sound"},
-    "turk": {"sound": "arrrrrrrrr (Turk!)", "desc": "Twisted sound"}
+    "عر": {"sound": "عر عر عر", "desc": "صدای معمولی خر"},
+    "عرعر": {"sound": "عر عر عر عر", "desc": "صدای پشت سر هم"},
+    "عرر": {"sound": "عررررررر", "desc": "صدای کشیده"},
+    "ترک": {"sound": "عر-عر-عر-عر (ترک!)", "desc": "صدای شکسته"},
+    "تورک": {"sound": "عررررررررر (تورک!)", "desc": "صدای پیچیده"}
 }
 
 SOUND_COOLDOWN = 120
@@ -288,7 +290,7 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
         minutes = remaining // 60
         seconds = remaining % 60
         return await update.message.reply_text(
-            f"Wait {minutes} minutes and {seconds} seconds to sound again!"
+            f"⏳ {minutes} دقیقه و {seconds} ثانیه صبر کن تا دوباره صدا بدی! 🐴"
         )
     
     keyword = None
@@ -306,7 +308,7 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if random.random() < 0.05:
         reward = random.randint(20, 50)
-        bonus = "\nSpecial Reward!"
+        bonus = "\n🎉 **جایزه ویژه!**"
     
     if reward > 0:
         add_coins(user.id, reward)
@@ -316,17 +318,18 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.commit()
     
     await update.message.reply_text(
-        f"Donkey Sound!\n"
-        f"========================\n"
-        f"{sound_info['sound']}\n"
-        f"{sound_info['desc']}\n"
-        f"\n{user.first_name}\n"
-        f"Reward: {reward} T-Top"
-        f"{bonus}"
+        f"🔊 **صدای خر!**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🎤 {sound_info['sound']}\n"
+        f"📝 {sound_info['desc']}\n"
+        f"\n👤 {user.first_name} عر کشید! 🐴\n"
+        f"💰 جایزه: **{reward}** {CURRENCY_NAME}"
+        f"{bonus}",
+        parse_mode="Markdown"
     )
 
 # ============================================================
-# MATING SYSTEM
+# جفت‌گیری
 # ============================================================
 
 MATE_COST = 500
@@ -339,50 +342,50 @@ async def mate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     if not update.message.reply_to_message:
         return await update.message.reply_text(
-            "Reply to the target person's message and type: mate"
+            "❌ روی پیام شخص مورد نظر **ریپلی (Reply)** بزن و سپس `جفت‌گیری` رو تایپ کن."
         )
     
     target = update.message.reply_to_message.from_user
     target_id = target.id
     
     if user.id == target_id:
-        return await update.message.reply_text("You cannot mate with yourself!")
+        return await update.message.reply_text("❌ نمی‌تونی با خودت جفت‌گیری کنی! 😂")
     
     ensure_user(target_id, target.first_name)
     u1 = get_user(user.id)
     u2 = get_user(target_id)
     
     if u1["level"] < 2:
-        return await update.message.reply_text(f"{user.first_name}, your level is {u1['level']}. You need level 2 to mate!")
+        return await update.message.reply_text(f"❌ {user.first_name} عزیز، سطح تو {u1['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسی! 🐣")
     
     if u2["level"] < 2:
-        return await update.message.reply_text(f"{target.first_name}, level is {u2['level']}. Need level 2 to mate!")
+        return await update.message.reply_text(f"❌ {target.first_name} عزیز، سطحش {u2['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسه! 🐣")
     
     if u1["coins"] < MATE_COST:
-        return await update.message.reply_text(f"{user.first_name} doesn't have {MATE_COST} T-Top!")
+        return await update.message.reply_text(f"❌ {user.first_name} {MATE_COST} {CURRENCY_NAME} نداری! 💸")
     if u2["coins"] < MATE_COST:
-        return await update.message.reply_text(f"{target.first_name} doesn't have {MATE_COST} T-Top!")
+        return await update.message.reply_text(f"❌ {target.first_name} {MATE_COST} {CURRENCY_NAME} نداره! 💸")
     
     babies1 = json.loads(u1["baby_names"]) if u1["baby_names"] else []
     babies2 = json.loads(u2["baby_names"]) if u2["baby_names"] else []
     
     if len(babies1) >= MAX_BABIES:
-        return await update.message.reply_text(f"{user.first_name} has max babies! ({MAX_BABIES})")
+        return await update.message.reply_text(f"❌ {user.first_name} دیگه جا برای کره‌خر جدید نداری! (حداکثر {MAX_BABIES})")
     if len(babies2) >= MAX_BABIES:
-        return await update.message.reply_text(f"{target.first_name} has max babies! ({MAX_BABIES})")
+        return await update.message.reply_text(f"❌ {target.first_name} دیگه جا برای کره‌خر جدید نداره! (حداکثر {MAX_BABIES})")
     
     now = int(time.time())
     if now - u1["last_mate"] < MATE_COOLDOWN:
         remaining = (MATE_COOLDOWN - (now - u1["last_mate"])) // 3600
-        return await update.message.reply_text(f"{user.first_name}, wait {remaining} hours to mate again!")
+        return await update.message.reply_text(f"⏳ {user.first_name} عزیز، {remaining} ساعت دیگه می‌تونی جفت‌گیری کنی!")
     if now - u2["last_mate"] < MATE_COOLDOWN:
         remaining = (MATE_COOLDOWN - (now - u2["last_mate"])) // 3600
-        return await update.message.reply_text(f"{target.first_name}, wait {remaining} hours to mate again!")
+        return await update.message.reply_text(f"⏳ {target.first_name} عزیز، {remaining} ساعت دیگه می‌تونه جفت‌گیری کنه!")
     
     remove_coins(user.id, MATE_COST)
     remove_coins(target_id, MATE_COST)
     
-    baby_names = ["Baby Donkey 1", "Baby Donkey 2", "Baby Donkey 3", "Baby Donkey 4", "Baby Donkey 5"]
+    baby_names = ["🐣 کره‌خر کوچولو", "🐣 کره‌خر نازنین", "🐣 کره‌خر خوشگل", "🐣 کره‌خر بازیگوش", "🐣 کره‌خر شیطون"]
     baby_name = random.choice(baby_names)
     
     babies1.append(baby_name)
@@ -396,27 +399,28 @@ async def mate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.commit()
     
     await update.message.reply_text(
-        f"Mating Successful!\n"
-        f"========================\n"
-        f"{user.first_name} + {target.first_name}\n\n"
-        f"Baby Born: {baby_name}\n"
-        f"{user.first_name} babies: {len(babies1)}\n"
-        f"{target.first_name} babies: {len(babies2)}\n\n"
-        f"Cost: {MATE_COST} T-Top each"
+        f"🎉 **تبریک! جفت‌گیری موفق!**\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"👫 {user.first_name} ❤️ {target.first_name}\n\n"
+        f"🐣 **کره‌خر متولد شد:** {baby_name}\n"
+        f"👶 تعداد کره‌خرهای {user.first_name}: {len(babies1)}\n"
+        f"👶 تعداد کره‌خرهای {target.first_name}: {len(babies2)}\n\n"
+        f"💸 هزینه: {MATE_COST} {CURRENCY_NAME} از هر نفر",
+        parse_mode="Markdown"
     )
 
 # ============================================================
-# GAME NAMES
+# نام بازی‌ها
 # ============================================================
 
 GAME_NAMES = {
-    "rps": "Rock-Paper-Scissors",
-    "blackjack": "Blackjack 21",
-    "crash": "Crash",
-    "poker": "Poker",
-    "ttt": "Tic-Tac-Toe",
-    "dice": "Dice",
-    "roulette": "Russian Roulette"
+    "rps": "✊ سنگ-کاغذ-قیچی",
+    "blackjack": "🃏 بلک‌جک ۲۱",
+    "crash": "💥 انفجار",
+    "poker": "🎰 پوکر",
+    "ttt": "❌⭕ دوز",
+    "dice": "🎲 تاس",
+    "roulette": "🔫 رولت روسی"
 }
 
 GAME_MAX_PLAYERS = {
@@ -433,7 +437,7 @@ GAME_HANDLERS = {}
 
 async def game_placeholder(room, context):
     await context.bot.edit_message_text(
-        "This game is under development!",
+        "🎮 این بازی در حال توسعه است!",
         chat_id=room.chat_id,
         message_id=room.message_id
     )
@@ -442,7 +446,7 @@ for game in GAME_NAMES.keys():
     GAME_HANDLERS[game] = game_placeholder
 
 # ============================================================
-# ROOM MANAGEMENT
+# مدیریت اتاق‌ها
 # ============================================================
 
 ACTIVE_ROOMS = {}
@@ -487,102 +491,102 @@ def create_room(chat_id: int, game_type: str, creator_id: int, bet: int) -> Game
     return room
 
 # ============================================================
-# UI COMPONENTS
+# دکمه‌ها
 # ============================================================
 
 def main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Games", callback_data="games_list")],
-        [InlineKeyboardButton("Profile", callback_data="show_profile"), 
-         InlineKeyboardButton("Shop", callback_data="shop")],
-        [InlineKeyboardButton("Leaderboard", callback_data="leaderboard")]
+        [InlineKeyboardButton("🎮 بازی‌ها", callback_data="games_list")],
+        [InlineKeyboardButton("👤 پروفایل", callback_data="show_profile"), 
+         InlineKeyboardButton("🏪 فروشگاه", callback_data="shop")],
+        [InlineKeyboardButton("🏆 جدول", callback_data="leaderboard")]
     ])
 
 def games_menu():
     buttons = []
     for key, name in GAME_NAMES.items():
         buttons.append([InlineKeyboardButton(name, callback_data=f"game_{key}")])
-    buttons.append([InlineKeyboardButton("Back", callback_data="home")])
+    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="home")])
     return InlineKeyboardMarkup(buttons)
 
 def shop_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("Hats", callback_data="shop_hats")],
-        [InlineKeyboardButton("Saddles", callback_data="shop_saddles")],
-        [InlineKeyboardButton("Horseshoes", callback_data="shop_horseshoes")],
-        [InlineKeyboardButton("Ties", callback_data="shop_ties")],
-        [InlineKeyboardButton("Clothes", callback_data="shop_clothes")],
-        [InlineKeyboardButton("Accessories", callback_data="shop_accessories")],
-        [InlineKeyboardButton("Back", callback_data="home")]
+        [InlineKeyboardButton("🎩 کلاه‌ها", callback_data="shop_hats")],
+        [InlineKeyboardButton("🐴 زین‌ها", callback_data="shop_saddles")],
+        [InlineKeyboardButton("👟 نعل‌ها", callback_data="shop_horseshoes")],
+        [InlineKeyboardButton("👔 کروات‌ها", callback_data="shop_ties")],
+        [InlineKeyboardButton("👕 لباس‌ها", callback_data="shop_clothes")],
+        [InlineKeyboardButton("🎀 اکسسوری‌ها", callback_data="shop_accessories")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ])
 
 # ============================================================
-# SHOP DATA
+# اطلاعات فروشگاه
 # ============================================================
 
 SHOP_ITEMS = {
     "hats": {
-        "name": "Hats",
+        "name": "🎩 کلاه‌ها",
         "items": {
-            "Straw Hat": {"price": 500},
-            "Cowboy Hat": {"price": 2000},
-            "Military Hat": {"price": 4000},
-            "Fancy Hat": {"price": 7000},
-            "Royal Crown": {"price": 15000}
+            "کلاه نی": {"price": 500, "emoji": "🧑‍🌾"},
+            "کلاه کابوی": {"price": 2000, "emoji": "🤠"},
+            "کلاه نظامی": {"price": 4000, "emoji": "🪖"},
+            "کلاه شیک": {"price": 7000, "emoji": "🎩"},
+            "تاج سلطنتی": {"price": 15000, "emoji": "👑"}
         }
     },
     "saddles": {
-        "name": "Saddles",
+        "name": "🐴 زین‌ها",
         "items": {
-            "Simple Leather": {"price": 1000},
-            "Silver Saddle": {"price": 3500},
-            "Golden Saddle": {"price": 8000},
-            "Diamond Saddle": {"price": 20000}
+            "زین چرمی ساده": {"price": 1000, "emoji": "🟫"},
+            "زین نقره‌ای": {"price": 3500, "emoji": "🥈"},
+            "زین طلایی": {"price": 8000, "emoji": "🥇"},
+            "زین الماسی": {"price": 20000, "emoji": "💎"}
         }
     },
     "horseshoes": {
-        "name": "Horseshoes",
+        "name": "👟 نعل‌ها",
         "items": {
-            "Iron Horseshoe": {"price": 500},
-            "Bronze Horseshoe": {"price": 2000},
-            "Silver Horseshoe": {"price": 5000},
-            "Golden Horseshoe": {"price": 12000}
+            "نعل آهنی": {"price": 500, "emoji": "⚙️"},
+            "نعل برنزی": {"price": 2000, "emoji": "🟠"},
+            "نعل نقره‌ای": {"price": 5000, "emoji": "⚪"},
+            "نعل طلایی": {"price": 12000, "emoji": "✨"}
         }
     },
     "ties": {
-        "name": "Ties",
+        "name": "👔 کروات‌ها",
         "items": {
-            "Simple Tie": {"price": 500},
-            "Striped Tie": {"price": 1500},
-            "Sparkly Tie": {"price": 3000},
-            "Silk Tie": {"price": 6000},
-            "Royal Tie": {"price": 10000}
+            "کروات ساده": {"price": 500, "emoji": "⬛"},
+            "کروات راه‌راه": {"price": 1500, "emoji": "🟦"},
+            "کروات پولک‌دار": {"price": 3000, "emoji": "✨"},
+            "کروات ابریشمی": {"price": 6000, "emoji": "🎀"},
+            "کروات سلطنتی": {"price": 10000, "emoji": "👔"}
         }
     },
     "clothes": {
-        "name": "Clothes",
+        "name": "👕 لباس‌ها",
         "items": {
-            "Simple Clothes": {"price": 500},
-            "Fancy Clothes": {"price": 2000},
-            "Formal Clothes": {"price": 4000},
-            "Military Uniform": {"price": 7000},
-            "Royal Clothes": {"price": 15000}
+            "لباس ساده": {"price": 500, "emoji": "👕"},
+            "لباس شیک": {"price": 2000, "emoji": "🧥"},
+            "لباس مجلسی": {"price": 4000, "emoji": "🤵"},
+            "لباس نظامی": {"price": 7000, "emoji": "🎖️"},
+            "لباس سلطنتی": {"price": 15000, "emoji": "👘"}
         }
     },
     "accessories": {
-        "name": "Accessories",
+        "name": "🎀 اکسسوری‌ها",
         "items": {
-            "Neck Bell": {"price": 500},
-            "Simple Bow": {"price": 1000},
-            "Sunglasses": {"price": 2500},
-            "Scarf": {"price": 4000},
-            "Angel Wings": {"price": 10000}
+            "زنگوله گردن": {"price": 500, "emoji": "🔔"},
+            "پاپیون ساده": {"price": 1000, "emoji": "🎀"},
+            "عینک آفتابی": {"price": 2500, "emoji": "😎"},
+            "شال گردن": {"price": 4000, "emoji": "🧣"},
+            "بال فرشته": {"price": 10000, "emoji": "🕊️"}
         }
     }
 }
 
 # ============================================================
-# MESSAGE HANDLER
+# هندلر پیام‌ها
 # ============================================================
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -592,9 +596,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     u_data = get_user(user.id)
     if u_data and u_data["is_banned"] == 1:
-        return await update.message.reply_text("You are banned!")
+        return await update.message.reply_text("🚫 شما بن شده‌اید!")
     
-    # ===== ADMIN COMMANDS =====
+    # ===== دستورات ادمین =====
     if user.id == OWNER_ID and update.message.reply_to_message:
         parts = text.split()
         if not parts:
@@ -602,64 +606,65 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cmd = parts[0].lower()
         target = update.message.reply_to_message.from_user
         
-        if cmd in ["/ban", "ban"]:
+        if cmd in ["/ban", "بن"]:
             with closing(db_connect()) as db:
                 db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (target.id,))
                 db.commit()
-            await update.message.reply_text(f"{target.first_name} banned!")
+            await update.message.reply_text(f"✅ {target.first_name} بن شد!")
             return
-        if cmd in ["/unban", "unban"]:
+        if cmd in ["/unban", "انبن"]:
             with closing(db_connect()) as db:
                 db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (target.id,))
                 db.commit()
-            await update.message.reply_text(f"{target.first_name} unbanned!")
+            await update.message.reply_text(f"✅ {target.first_name} آنبن شد!")
             return
-        if cmd in ["/addcoin", "+coin"] and len(parts) > 1:
+        if cmd in ["/addcoin", "+سکه"] and len(parts) > 1:
             try:
                 amt = int(parts[1])
                 add_coins(target.id, amt)
-                await update.message.reply_text(f"{amt:,} T-Top added to {target.first_name}!")
+                await update.message.reply_text(f"💰 {amt:,} {CURRENCY_NAME} به {target.first_name} اضافه شد!")
             except:
                 pass
             return
-        if cmd in ["/remcoin", "-coin"] and len(parts) > 1:
+        if cmd in ["/remcoin", "-سکه"] and len(parts) > 1:
             try:
                 amt = int(parts[1])
                 with closing(db_connect()) as db:
                     db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (amt, target.id))
                     db.commit()
-                await update.message.reply_text(f"{amt:,} T-Top removed from {target.first_name}!")
+                await update.message.reply_text(f"🔥 {amt:,} {CURRENCY_NAME} از {target.first_name} کسر شد!")
             except:
                 pass
             return
     
-    # ===== START =====
+    # ===== شروع =====
     if text.startswith("/start"):
         return await update.message.reply_text(
-            "Welcome to Kharbot!\n\n"
-            "Features:\n"
-            "- 7 different games\n"
-            "- Compete with friends\n"
-            "- Daily rewards\n"
-            "- Donkey sounds with rewards\n"
-            "- Mate and have baby donkeys\n"
-            "- Decorate your donkey\n\n"
-            "Use the menu:",
-            reply_markup=main_menu()
+            "🫏 **به طویله خرستان خوش آمدید!**\n\n"
+            "با ربات ما می‌توانید:\n"
+            "• 🎮 ۷ بازی مختلف انجام دهید\n"
+            "• 🏆 با دوستان مسابقه دهید\n"
+            "• 🎁 جایزه روزانه بگیرید\n"
+            "• 🔊 صدای خر بدهید و جایزه بگیرید\n"
+            "• ❤️ جفت‌گیری کنید و کره‌خر داشته باشید\n"
+            "• 🎀 خر خود را با وسایل مختلف تزئین کنید\n\n"
+            "از منو استفاده کنید:",
+            reply_markup=main_menu(),
+            parse_mode="Markdown"
         )
     
-    # ===== DAILY REWARD =====
-    if text in ["daily", "day"]:
+    # ===== جایزه روزانه =====
+    if text in ["روزانه", "daily", "جایزه روزانه"]:
         await daily_reward(update, context)
         return
     
-    # ===== MATE =====
-    if text in ["mate", "جفت"]:
+    # ===== جفت‌گیری =====
+    if text == "جفت‌گیری":
         await mate_command(update, context)
         return
     
-    # ===== PROFILE =====
-    if text in ["profile", "p"]:
+    # ===== پروفایل =====
+    if text in ["پروفایل", "profile", "پروف"]:
         if update.message.reply_to_message:
             target = update.message.reply_to_message.from_user
             target_id = target.id
@@ -667,32 +672,34 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             target_id = user.id
         return await update.message.reply_text(
             profile_text(target_id),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="home")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
+            parse_mode="Markdown"
         )
     
-    # ===== COINS =====
-    if text in ["coins", "c"]:
+    # ===== سکه =====
+    if text in ["سکه", "coins", "تی‌تاپ"]:
         u = get_user(user.id)
         return await update.message.reply_text(
-            f"Your Balance: {u['coins']:,} T-Top",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="home")]])
+            f"💰 **موجودی شما:** {u['coins']:,} {CURRENCY_NAME}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
+            parse_mode="Markdown"
         )
     
-    # ===== LEADERBOARD =====
-    if text in ["leaderboard", "top", "table"]:
+    # ===== جدول =====
+    if text in ["جدول", "ج", "leaderboard", "top"]:
         with closing(db_connect()) as db:
             rows = db.execute(
                 "SELECT user_id, name, coins, level FROM users ORDER BY coins DESC LIMIT 10"
             ).fetchall()
         
         if not rows:
-            return await update.message.reply_text("No users yet!")
+            return await update.message.reply_text("❌ هنوز کسی ثبت نشده!")
         
-        msg = "Leaderboard\n========================\n"
+        msg = "🏆 **جدول ثروتمندان طویله**\n━━━━━━━━━━━━━━━━\n"
         for i, row in enumerate(rows, 1):
-            medal = ["1st", "2nd", "3rd"][i-1] if i <= 3 else f"{i}."
+            medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             title = get_title_by_level(row["level"])
-            msg += f"{medal} {title} {row['name']} - {row['coins']:,} T-Top (Level {row['level']})\n"
+            msg += f"{medal} {title} {row['name']} — {row['coins']:,} {CURRENCY_NAME} (سطح {row['level']})\n"
         
         user_row = db.execute(
             "SELECT COUNT(*) + 1 as rank FROM users WHERE coins > (SELECT coins FROM users WHERE user_id = ?)",
@@ -700,17 +707,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).fetchone()
         
         if user_row and user_row["rank"]:
-            msg += f"\n========================\nYour Rank: #{user_row['rank']}"
+            msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
         
-        return await update.message.reply_text(msg)
+        return await update.message.reply_text(msg, parse_mode="Markdown")
     
-    # ===== DONKEY SOUND =====
-    if text in ["ar", "arar", "arr", "trak", "turk"]:
+    # ===== صدای خر =====
+    if text in ["عر", "عرعر", "عرر", "ترک", "تورک"]:
         await donkey_sound(update, context)
         return
 
 # ============================================================
-# CALLBACK HANDLER
+# هندلر دکمه‌ها
 # ============================================================
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -721,55 +728,59 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     u_data = get_user(user.id)
     if u_data and u_data["is_banned"] == 1:
-        return await query.edit_message_text("You are banned!")
+        return await query.edit_message_text("🚫 شما بن شده‌اید!")
     
     data = query.data
     
-    # ===== HOME =====
+    # ===== خانه =====
     if data == "home":
         return await query.edit_message_text(
-            "Main Menu",
-            reply_markup=main_menu()
+            "🏠 **منوی اصلی طویله**",
+            reply_markup=main_menu(),
+            parse_mode="Markdown"
         )
     
-    # ===== GAMES LIST =====
+    # ===== لیست بازی‌ها =====
     if data == "games_list":
         return await query.edit_message_text(
-            "Select Game:",
-            reply_markup=games_menu()
+            "🎮 **انتخاب بازی:**",
+            reply_markup=games_menu(),
+            parse_mode="Markdown"
         )
     
-    # ===== GAME SELECTION =====
+    # ===== انتخاب بازی =====
     if data.startswith("game_"):
         game_type = data[5:]
         if game_type not in GAME_NAMES:
             return
         
         if user.id in PLAYER_IN_GAME:
-            return await query.answer("You are already in a game!", show_alert=True)
+            return await query.answer("⚠️ شما در یک بازی دیگر هستید!", show_alert=True)
         
         context.user_data["temp_game"] = game_type
         context.user_data["awaiting_bet"] = True
         
         await query.edit_message_text(
-            f"Game: {GAME_NAMES[game_type]}\n"
-            f"========================\n"
-            f"Min Bet: {MIN_BET} T-Top\n"
-            f"Max Players: {GAME_MAX_PLAYERS[game_type]}\n\n"
-            f"Enter bet amount (number):",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="games_list")]])
+            f"🎮 **{GAME_NAMES[game_type]}**\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 حداقل شرط: {MIN_BET} {CURRENCY_NAME}\n"
+            f"👥 حداکثر بازیکن: {GAME_MAX_PLAYERS[game_type]}\n\n"
+            f"مبلغ شرط را وارد کنید (عدد):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data="games_list")]]),
+            parse_mode="Markdown"
         )
         context.user_data["awaiting_bet"] = True
         return
     
-    # ===== PROFILE =====
+    # ===== پروفایل =====
     if data == "show_profile":
         return await query.edit_message_text(
             profile_text(user.id),
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="home")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
+            parse_mode="Markdown"
         )
     
-    # ===== LEADERBOARD =====
+    # ===== جدول =====
     if data == "leaderboard":
         with closing(db_connect()) as db:
             rows = db.execute(
@@ -777,13 +788,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ).fetchall()
         
         if not rows:
-            return await query.edit_message_text("No users yet!")
+            return await query.edit_message_text("❌ هنوز کسی ثبت نشده!")
         
-        msg = "Leaderboard\n========================\n"
+        msg = "🏆 **جدول ثروتمندان طویله**\n━━━━━━━━━━━━━━━━\n"
         for i, row in enumerate(rows, 1):
-            medal = ["1st", "2nd", "3rd"][i-1] if i <= 3 else f"{i}."
+            medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             title = get_title_by_level(row["level"])
-            msg += f"{medal} {title} {row['name']} - {row['coins']:,} T-Top (Level {row['level']})\n"
+            msg += f"{medal} {title} {row['name']} — {row['coins']:,} {CURRENCY_NAME} (سطح {row['level']})\n"
         
         user_row = db.execute(
             "SELECT COUNT(*) + 1 as rank FROM users WHERE coins > (SELECT coins FROM users WHERE user_id = ?)",
@@ -791,21 +802,23 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ).fetchone()
         
         if user_row and user_row["rank"]:
-            msg += f"\n========================\nYour Rank: #{user_row['rank']}"
+            msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
         
         return await query.edit_message_text(
             msg,
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data="home")]])
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
+            parse_mode="Markdown"
         )
     
-    # ===== SHOP =====
+    # ===== فروشگاه =====
     if data == "shop":
         return await query.edit_message_text(
-            "Shop:",
-            reply_markup=shop_keyboard()
+            "🏪 **فروشگاه طویله**\nانتخاب کنید:",
+            reply_markup=shop_keyboard(),
+            parse_mode="Markdown"
         )
     
-    # ===== SHOP CATEGORIES =====
+    # ===== دسته‌بندی فروشگاه =====
     if data.startswith("shop_"):
         category = data[5:]
         if category not in SHOP_ITEMS:
@@ -815,17 +828,18 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons = []
         for item_name, item_data in cat_data["items"].items():
             buttons.append([InlineKeyboardButton(
-                f"{item_name} - {item_data['price']:,} T-Top",
+                f"{item_data['emoji']} {item_name} - {item_data['price']:,} {CURRENCY_NAME}",
                 callback_data=f"buy_{category}_{item_name}"
             )])
-        buttons.append([InlineKeyboardButton("Back", callback_data="shop")])
+        buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="shop")])
         
         return await query.edit_message_text(
-            f"{cat_data['name']}:",
-            reply_markup=InlineKeyboardMarkup(buttons)
+            f"🏪 **{cat_data['name']}**\nانتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="Markdown"
         )
     
-    # ===== BUY ITEM =====
+    # ===== خرید =====
     if data.startswith("buy_"):
         parts = data.split("_")
         if len(parts) < 3:
@@ -842,11 +856,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         price = item_data["price"]
         
         if not remove_coins(user.id, price):
-            return await query.answer(f"You don't have {price:,} T-Top!", show_alert=True)
+            return await query.answer(f"❌ {price:,} {CURRENCY_NAME} ندارید!", show_alert=True)
         
         donkey = get_donkey(user.id)
         if not donkey:
-            return await query.answer("You don't have a donkey!", show_alert=True)
+            return await query.answer("❌ خر شما وجود ندارد!", show_alert=True)
         
         col_map = {
             "hats": "equipped_hat",
@@ -863,31 +877,32 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db.execute(f"UPDATE donkeys SET {col} = ? WHERE user_id = ?", (item_name, user.id))
                 db.commit()
         
-        await query.answer(f"{item_name} purchased and equipped!", show_alert=True)
+        await query.answer(f"✅ {item_name} خریداری و فعال شد!", show_alert=True)
         
         await query.edit_message_text(
-            f"Purchase Successful!\n{item_name} equipped on your donkey.\nCost: {price:,} T-Top",
-            reply_markup=shop_keyboard()
+            f"✅ **خرید موفق!**\n{item_data['emoji']} {item_name} روی خر شما قرار گرفت.\n💰 هزینه: {price:,} {CURRENCY_NAME}",
+            reply_markup=shop_keyboard(),
+            parse_mode="Markdown"
         )
         return
 
 # ============================================================
-# MAIN
+# اصلی
 # ============================================================
 
 def main():
     if not BOT_TOKEN:
-        logger.error("BOT_TOKEN not set!")
+        logger.error("❌ BOT_TOKEN تنظیم نشده!")
         return
     
     init_db()
-    logger.info("Database initialized")
+    logger.info("✅ دیتابیس راه‌اندازی شد")
     
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT, message_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     
-    logger.info("Kharbot started!")
+    logger.info("✅ ربات خرستان راه‌اندازی شد!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
