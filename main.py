@@ -1,12 +1,15 @@
 import os
 import sqlite3
-import time
 import random
-import asyncio
-from pathlib import Path
-from datetime import datetime, timezone
+import time
+import logging
+from datetime import datetime
 
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -30,17 +33,29 @@ try:
 except ValueError:
     ADMIN_ID = 0
 
-START_SCORE = 100
-DAILY_SCORE = 100
 ARR_SCORE = 10
 ARR_COOLDOWN = 30
+DAILY_SCORE = 100
+
+
+# =========================================================
+# LOGGING
+# =========================================================
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
+)
+
+logger = logging.getLogger("Kharbot")
 
 
 # =========================================================
 # DATABASE
 # =========================================================
-
-import sqlite3
+# IMPORTANT:
+# Belmo /app is read-only.
+# Therefore we use /tmp for now.
 
 DB_PATH = "/tmp/kharbot.db"
 
@@ -49,108 +64,40 @@ db = sqlite3.connect(
     check_same_thread=False
 )
 
-# =========================================================
-# DATABASE HELPERS
-# =========================================================
+cursor = db.cursor()
 
-def db_commit():
+
+def init_database():
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT DEFAULT '',
+            first_name TEXT DEFAULT '',
+            score INTEGER DEFAULT 0,
+            last_daily INTEGER DEFAULT 0,
+            title TEXT DEFAULT '',
+            q_arr_count INTEGER DEFAULT 0,
+            q_game_count INTEGER DEFAULT 0,
+            q_ai_count INTEGER DEFAULT 0,
+            q_last_reset TEXT DEFAULT ''
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS inventory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            item_id TEXT NOT NULL,
+            item_name TEXT NOT NULL,
+            quantity INTEGER DEFAULT 1,
+            UNIQUE(user_id, item_id)
+        )
+    """)
+
     db.commit()
 
 
-def create_user(user):
-    today = datetime.now().strftime("%Y-%m-%d")
-
-    cursor.execute(
-        "SELECT user_id, q_last_reset FROM users WHERE user_id = ?",
-        (user.id,)
-    )
-
-    row = cursor.fetchone()
-
-    if row is None:
-        cursor.execute("""
-            INSERT INTO users (
-                user_id,
-                username,
-                first_name,
-                score,
-                q_last_reset
-            )
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            user.id,
-            user.username or "",
-            user.first_name or "Player",
-            START_SCORE,
-            today
-        ))
-
-    else:
-        cursor.execute("""
-            UPDATE users
-            SET username = ?,
-                first_name = ?
-            WHERE user_id = ?
-        """, (
-            user.username or "",
-            user.first_name or "Player",
-            user.id
-        ))
-
-        if row["q_last_reset"] != today:
-            cursor.execute("""
-                UPDATE users
-                SET q_arr_count = 0,
-                    q_game_count = 0,
-                    q_ai_count = 0,
-                    q_last_reset = ?
-                WHERE user_id = ?
-            """, (today, user.id))
-
-    db_commit()
-
-
-def get_score(user_id):
-    cursor.execute(
-        "SELECT score FROM users WHERE user_id = ?",
-        (user_id,)
-    )
-    row = cursor.fetchone()
-    return int(row["score"]) if row else 0
-
-
-def add_score(user_id, amount):
-    cursor.execute(
-        "UPDATE users SET score = score + ? WHERE user_id = ?",
-        (amount, user_id)
-    )
-    db_commit()
-
-
-def remove_score(user_id, amount):
-    cursor.execute(
-        "UPDATE users SET score = MAX(0, score - ?) WHERE user_id = ?",
-        (amount, user_id)
-    )
-    db_commit()
-
-
-def update_quest(user_id, quest_type):
-    column = {
-        "arr": "q_arr_count",
-        "game": "q_game_count",
-        "ai": "q_ai_count"
-    }.get(quest_type)
-
-    if not column:
-        return
-
-    cursor.execute(
-        f"UPDATE users SET {column} = {column} + 1 WHERE user_id = ?",
-        (user_id,)
-    )
-
-    db_commit()
+init_database()
 
 
 # =========================================================
@@ -167,20 +114,17 @@ if GROQ_API_KEY:
 
 
 SYSTEM_INSTRUCTION = """
-تو «خر‌بات» هستی و شخصیتت «تورکعلی» است.
-
-یک ربات فارسی‌زبان بامزه، شیطون، صمیمی و اهل کل‌کل هستی.
-جواب‌ها کوتاه و سرگرم‌کننده باشند.
-گاهی از ایموجی 🫏😂 استفاده کن.
-بی‌جهت جواب‌های خیلی طولانی نده.
-اگر کاربر گفت «تورکعلی»، خودت را تورکعلی معرفی کن.
+تو «خر‌بات» هستی؛ یک ربات فارسی بامزه، شیطون، شوخ‌طبع و صمیمی.
+با کاربرها دوستانه و باکل‌کل حرف بزن.
+جواب‌ها طبیعی و کوتاه باشند.
+اگر کاربر ازت سوال جدی پرسید، جواب مفید بده.
 """
 
 
-async def ask_ai(prompt):
+async def ask_ai(prompt: str) -> str:
 
     if not ai_client:
-        return "🫏 تورکعلی: کلید GROQ_API_KEY هنوز تنظیم نشده 😂"
+        return "🫏 کلید GROQ_API_KEY تنظیم نشده!"
 
     try:
         response = await ai_client.chat.completions.create(
@@ -195,78 +139,127 @@ async def ask_ai(prompt):
                     "content": prompt
                 }
             ],
-            temperature=0.9,
-            max_tokens=500
+            temperature=0.8,
+            max_tokens=500,
         )
 
         return response.choices[0].message.content.strip()
 
     except Exception as e:
-        print("AI ERROR:", e)
-        return "🫏 تورکعلی هنگ کرد 😂 دوباره بپرس."
+        logger.error("AI ERROR: %s", e)
+        return "🫏 مغزم هنگ کرد 😂 دوباره امتحان کن."
 
 
 # =========================================================
-# STORE
+# USER FUNCTIONS
 # =========================================================
 
-STORE_ITEMS = {
-    "title_boss": {
-        "name": "🔥 لقب خرِ بزرگ",
-        "price": 1000,
-        "type": "title",
-        "value": "🔥 خرِ بزرگ"
-    },
+def create_user(user):
 
-    "title_king": {
-        "name": "👑 سلطان طویله",
-        "price": 2000,
-        "type": "title",
-        "value": "👑 سلطان طویله"
-    },
+    today = datetime.now().strftime("%Y-%m-%d")
 
-    "title_legend": {
-        "name": "🌟 اسطوره یونجه",
-        "price": 5000,
-        "type": "title",
-        "value": "🌟 اسطوره یونجه"
-    },
+    cursor.execute(
+        "SELECT q_last_reset FROM users WHERE user_id = ?",
+        (user.id,)
+    )
 
-    "luck": {
-        "name": "🎲 کارت شانس",
-        "price": 300,
-        "type": "item"
-    },
+    row = cursor.fetchone()
 
-    "boost": {
-        "name": "⚡ کارت دوبرابر",
-        "price": 800,
-        "type": "item"
-    }
-}
+    if row is None:
 
-
-def store_keyboard():
-
-    keyboard = []
-
-    for item_id, item in STORE_ITEMS.items():
-
-        keyboard.append([
-            InlineKeyboardButton(
-                f"{item['name']} | {item['price']} 🫏",
-                callback_data=f"buy:{item_id}"
+        cursor.execute("""
+            INSERT INTO users
+            (
+                user_id,
+                username,
+                first_name,
+                q_last_reset
             )
-        ])
+            VALUES (?, ?, ?, ?)
+        """, (
+            user.id,
+            user.username or "",
+            user.first_name or "Player",
+            today
+        ))
 
-    keyboard.append([
-        InlineKeyboardButton(
-            "🔙 منوی اصلی",
-            callback_data="main"
-        )
-    ])
+    else:
 
-    return InlineKeyboardMarkup(keyboard)
+        if row[0] != today:
+
+            cursor.execute("""
+                UPDATE users
+                SET
+                    q_arr_count = 0,
+                    q_game_count = 0,
+                    q_ai_count = 0,
+                    q_last_reset = ?
+                WHERE user_id = ?
+            """, (
+                today,
+                user.id
+            ))
+
+    db.commit()
+
+
+def get_score(user_id):
+
+    cursor.execute(
+        "SELECT score FROM users WHERE user_id = ?",
+        (user_id,)
+    )
+
+    row = cursor.fetchone()
+
+    return row[0] if row else 0
+
+
+def add_score(user_id, amount):
+
+    cursor.execute("""
+        UPDATE users
+        SET score = score + ?
+        WHERE user_id = ?
+    """, (
+        amount,
+        user_id
+    ))
+
+    db.commit()
+
+
+def remove_score(user_id, amount):
+
+    cursor.execute("""
+        UPDATE users
+        SET score = MAX(0, score - ?)
+        WHERE user_id = ?
+    """, (
+        amount,
+        user_id
+    ))
+
+    db.commit()
+
+
+def update_quest(user_id, quest):
+
+    column = {
+        "arr": "q_arr_count",
+        "game": "q_game_count",
+        "ai": "q_ai_count"
+    }.get(quest)
+
+    if not column:
+        return
+
+    cursor.execute(
+        f"UPDATE users SET {column} = {column} + 1 WHERE user_id = ?",
+        (user_id,)
+    )
+
+    db.commit()
 
 
 # =========================================================
@@ -277,24 +270,44 @@ def main_menu(user_id):
 
     keyboard = [
         [
-            InlineKeyboardButton("👤 پروفایل", callback_data="profile"),
-            InlineKeyboardButton("💰 موجودی", callback_data="balance")
+            InlineKeyboardButton(
+                "👤 پروفایل",
+                callback_data="profile"
+            ),
+            InlineKeyboardButton(
+                "💰 موجودی",
+                callback_data="balance"
+            )
         ],
         [
-            InlineKeyboardButton("🎮 بازی‌ها", callback_data="games"),
-            InlineKeyboardButton("🛍 فروشگاه", callback_data="store")
+            InlineKeyboardButton(
+                "🎮 بازی‌ها",
+                callback_data="games"
+            ),
+            InlineKeyboardButton(
+                "🛍️ فروشگاه",
+                callback_data="store"
+            )
         ],
         [
-            InlineKeyboardButton("🎯 مأموریت‌ها", callback_data="quests"),
-            InlineKeyboardButton("🎒 انبار", callback_data="inventory")
+            InlineKeyboardButton(
+                "🎯 ماموریت‌ها",
+                callback_data="quests"
+            ),
+            InlineKeyboardButton(
+                "🎒 انبار",
+                callback_data="inventory"
+            )
         ],
         [
-            InlineKeyboardButton("🎁 روزانه", callback_data="daily"),
-            InlineKeyboardButton("🏆 رتبه‌بندی", callback_data="ranking")
-        ],
-        [
-            InlineKeyboardButton("🤖 تورکعلی", callback_data="ai"),
-            InlineKeyboardButton("📖 راهنما", callback_data="help")
+            InlineKeyboardButton(
+                "🎁 جایزه روزانه",
+                callback_data="daily"
+            ),
+            InlineKeyboardButton(
+                "📖 راهنما",
+                callback_data="help"
+            )
         ]
     ]
 
@@ -323,23 +336,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     create_user(user)
 
-    text = """
-🫏 **به خر‌بات خوش اومدی!**
-
-😂 اینجا قلمرو تورکعلیه!
-
-💰 سکه جمع کن
-🎮 بازی کن
-🎯 مأموریت انجام بده
-🛍 خرید کن
-🏆 رتبه بگیر
-🤖 با تورکعلی حرف بزن
-"""
-
     await update.message.reply_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=main_menu(user.id)
+        "🫏 **خر‌بات**\n\n"
+        "به قلمرو خرها خوش اومدی 😂\n\n"
+        "برای شروع یکی از گزینه‌های زیر رو انتخاب کن:",
+        reply_markup=main_menu(user.id),
+        parse_mode="Markdown"
     )
 
 
@@ -347,7 +349,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # PROFILE
 # =========================================================
 
-async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     user = update.effective_user
 
@@ -357,68 +359,41 @@ async def profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     create_user(user)
 
     cursor.execute(
-        "SELECT title, score FROM users WHERE user_id = ?",
+        "SELECT title FROM users WHERE user_id = ?",
         (user.id,)
     )
 
     row = cursor.fetchone()
 
-    title = row["title"] if row and row["title"] else (
-        "👑 مالک" if user.id == ADMIN_ID else "🫏 خر معمولی"
+    title = row[0] if row and row[0] else "🫏 خر معمولی"
+
+    if user.id == ADMIN_ID:
+        title = "👑 مالک خر‌بات"
+
+    text = (
+        "👤 **پروفایل**\n"
+        "━━━━━━━━━━━━\n"
+        f"📝 نام: {user.first_name}\n"
+        f"🆔 آیدی: `{user.id}`\n"
+        f"🏷️ لقب: {title}\n"
+        f"💰 موجودی: **{get_score(user.id)}** 🫏"
     )
-
-    text = f"""
-👤 **پروفایل**
-
-━━━━━━━━━━━━━━
-
-🏷 لقب: {title}
-📝 نام: {user.first_name}
-🆔 آیدی: `{user.id}`
-💰 موجودی: **{get_score(user.id)}** 🫏
-"""
 
     if update.callback_query:
 
         await update.callback_query.edit_message_text(
             text,
-            parse_mode="Markdown",
-            reply_markup=main_menu(user.id)
+            reply_markup=main_menu(user.id),
+            parse_mode="Markdown"
         )
 
     else:
 
         await update.message.reply_text(
             text,
-            parse_mode="Markdown",
-            reply_markup=main_menu(user.id)
+            reply_markup=main_menu(user.id),
+            parse_mode="Markdown"
         )
-
-
-# =========================================================
-# BALANCE
-# =========================================================
-
-async def balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-
-    if not user:
-        return
-
-    create_user(user)
-
-    text = f"""
-💰 **موجودی شما**
-
-🫏 {get_score(user.id)} پوینت
-"""
-
-    await update.callback_query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=main_menu(user.id)
-    )
 
 
 # =========================================================
@@ -441,20 +416,16 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         (user.id,)
     )
 
-    row = cursor.fetchone()
-
-    last = row["last_daily"]
+    last = cursor.fetchone()[0]
 
     if now - last < 86400:
 
         remaining = 86400 - (now - last)
-
         hours = remaining // 3600
-        minutes = (remaining % 3600) // 60
 
         text = (
-            f"⏳ جایزه روزانه رو گرفتی!\n\n"
-            f"🕐 {hours} ساعت و {minutes} دقیقه دیگه برگرد."
+            f"⏳ جایزه روزانه رو قبلاً گرفتی!\n"
+            f"حدود **{hours} ساعت** دیگه برگرد."
         )
 
     else:
@@ -464,24 +435,557 @@ async def daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (now, user.id)
         )
 
-        db_commit()
+        db.commit()
 
         add_score(user.id, DAILY_SCORE)
 
         text = (
-            f"🎁 **جایزه روزانه!**\n\n"
-            f"➕ {DAILY_SCORE} 🫏 پوینت"
+            "🎁 **جایزه روزانه دریافت شد!**\n\n"
+            f"+{DAILY_SCORE} 🫏 پوینت"
         )
+
+    if update.callback_query:
+
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=main_menu(user.id),
+            parse_mode="Markdown"
+        )
+
+    else:
+
+        await update.message.reply_text(
+            text,
+            parse_mode="Markdown"
+        )
+
+
+# =========================================================
+# QUESTS
+# =========================================================
+
+async def show_quests(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    create_user(user)
+
+    cursor.execute("""
+        SELECT
+            q_arr_count,
+            q_game_count,
+            q_ai_count
+        FROM users
+        WHERE user_id = ?
+    """, (user.id,))
+
+    arr_count, game_count, ai_count = cursor.fetchone()
+
+    text = (
+        "🎯 **ماموریت‌های امروز**\n"
+        "━━━━━━━━━━━━\n\n"
+        f"🫏 ۳ بار «عر» بگو: "
+        f"**{min(arr_count, 3)}/3**\n\n"
+        f"🎮 دو بازی انجام بده: "
+        f"**{min(game_count, 2)}/2**\n\n"
+        f"🤖 سه بار AI استفاده کن: "
+        f"**{min(ai_count, 3)}/3**"
+    )
+
+    if update.callback_query:
+
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=main_menu(user.id),
+            parse_mode="Markdown"
+        )
+
+    else:
+
+        await update.message.reply_text(
+            text,
+            parse_mode="Markdown"
+        )
+
+
+# =========================================================
+# INVENTORY
+# =========================================================
+
+async def show_inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    create_user(user)
+
+    cursor.execute("""
+        SELECT item_name, quantity
+        FROM inventory
+        WHERE user_id = ?
+    """, (user.id,))
+
+    items = cursor.fetchall()
+
+    if not items:
+
+        text = (
+            "🎒 **انبار خالیه!**\n\n"
+            "از فروشگاه آیتم بخر."
+        )
+
+    else:
+
+        text = "🎒 **انبار شما**\n\n"
+
+        for name, quantity in items:
+
+            text += f"🔹 {name} × {quantity}\n"
+
+    if update.callback_query:
+
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=main_menu(user.id),
+            parse_mode="Markdown"
+        )
+
+    else:
+
+        await update.message.reply_text(
+            text,
+            parse_mode="Markdown"
+        )
+
+
+# =========================================================
+# STORE
+# =========================================================
+
+STORE_ITEMS = {
+
+    "luck":
+        {
+            "name": "🎲 کارت شانس",
+            "price": 300
+        },
+
+    "boost":
+        {
+            "name": "⚡ بوستر دوبرابر",
+            "price": 800
+        },
+
+    "title_boss":
+        {
+            "name": "🔥 لقب خر بزرگ",
+            "price": 1000
+        },
+
+    "title_king":
+        {
+            "name": "👑 سلطان طویله",
+            "price": 2000
+        },
+
+    "title_legend":
+        {
+            "name": "🌟 اسطوره یونجه",
+            "price": 5000
+        }
+}
+
+
+async def show_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    create_user(user)
+
+    keyboard = []
+
+    for item_id, item in STORE_ITEMS.items():
+
+        keyboard.append([
+            InlineKeyboardButton(
+                f"{item['name']} — {item['price']} 🫏",
+                callback_data=f"buy:{item_id}"
+            )
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton(
+            "🔙 منوی اصلی",
+            callback_data="main"
+        )
+    ])
+
+    text = (
+        "🛍️ **فروشگاه خر‌بات**\n\n"
+        f"💰 موجودی: **{get_score(user.id)}** 🫏"
+    )
 
     await update.callback_query.edit_message_text(
         text,
-        parse_mode="Markdown",
-        reply_markup=main_menu(user.id)
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+
+async def buy_item(query, item_id):
+
+    user = query.from_user
+
+    item = STORE_ITEMS.get(item_id)
+
+    if not item:
+        return
+
+    if get_score(user.id) < item["price"]:
+
+        await query.answer(
+            "❌ موجودی کافی نیست!",
+            show_alert=True
+        )
+
+        return
+
+    remove_score(
+        user.id,
+        item["price"]
+    )
+
+    if item_id.startswith("title_"):
+
+        cursor.execute("""
+            UPDATE users
+            SET title = ?
+            WHERE user_id = ?
+        """, (
+            item["name"],
+            user.id
+        ))
+
+    else:
+
+        cursor.execute("""
+            INSERT INTO inventory
+            (user_id, item_id, item_name, quantity)
+            VALUES (?, ?, ?, 1)
+            ON CONFLICT(user_id, item_id)
+            DO UPDATE SET quantity = quantity + 1
+        """, (
+            user.id,
+            item_id,
+            item["name"]
+        ))
+
+    db.commit()
+
+    await query.answer(
+        "✅ خرید موفق بود!",
+        show_alert=True
+    )
+
+    await query.edit_message_text(
+        f"🎉 خرید انجام شد!\n\n"
+        f"💰 موجودی جدید: **{get_score(user.id)}** 🫏",
+        reply_markup=main_menu(user.id),
+        parse_mode="Markdown"
     )
 
 
 # =========================================================
-# ARR
+# ADMIN
+# =========================================================
+
+def is_admin(user_id):
+
+    return ADMIN_ID != 0 and user_id == ADMIN_ID
+
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+
+        if update.callback_query:
+            await update.callback_query.answer(
+                "❌ دسترسی نداری!",
+                show_alert=True
+            )
+
+        return
+
+    cursor.execute(
+        "SELECT COUNT(*) FROM users"
+    )
+
+    total_users = cursor.fetchone()[0]
+
+    text = (
+        "👑 **پنل مالک خر‌بات**\n"
+        "━━━━━━━━━━━━\n\n"
+        f"👥 کاربران: **{total_users}**\n\n"
+        "🛠️ دستورات مالک:\n\n"
+        "`/addcoin ID AMOUNT`\n"
+        "`/removecoin ID AMOUNT`\n"
+        "`/broadcast TEXT`"
+    )
+
+    if update.callback_query:
+
+        await update.callback_query.edit_message_text(
+            text,
+            reply_markup=main_menu(user.id),
+            parse_mode="Markdown"
+        )
+
+    else:
+
+        await update.message.reply_text(
+            text,
+            parse_mode="Markdown"
+        )
+
+
+async def add_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        return
+
+    try:
+
+        target = int(context.args[0])
+        amount = int(context.args[1])
+
+        if amount <= 0:
+            raise ValueError
+
+        add_score(target, amount)
+
+        await update.message.reply_text(
+            f"✅ **{amount}** پوینت اضافه شد.",
+            parse_mode="Markdown"
+        )
+
+    except Exception:
+
+        await update.message.reply_text(
+            "❌ فرمت:\n"
+            "`/addcoin 123456789 500`",
+            parse_mode="Markdown"
+        )
+
+
+async def remove_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user or not is_admin(user.id):
+        return
+
+    try:
+
+        target = int(context.args[0])
+        amount = int(context.args[1])
+
+        if amount <= 0:
+            raise ValueError
+
+        remove_score(target, amount)
+
+        await update.message.reply_text(
+            f"✅ **{amount}** پوینت کم شد.",
+            parse_mode="Markdown"
+        )
+
+    except Exception:
+
+        await update.message.reply_text(
+            "❌ فرمت:\n"
+            "`/removecoin 123456789 500`",
+            parse_mode="Markdown"
+        )
+
+
+# =========================================================
+# GIVE COIN
+# =========================================================
+
+async def give_coin(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user or not update.message.reply_to_message:
+        return
+
+    if not context.args:
+        return
+
+    try:
+
+        amount = int(context.args[0])
+
+        if amount <= 0:
+            return
+
+    except ValueError:
+
+        return
+
+    target = update.message.reply_to_message.from_user
+
+    if target.id == user.id:
+
+        await update.message.reply_text(
+            "🤡 نمی‌تونی به خودت پوینت بدی!"
+        )
+
+        return
+
+    create_user(target)
+
+    if get_score(user.id) < amount:
+
+        await update.message.reply_text(
+            "❌ موجودی کافی نداری!"
+        )
+
+        return
+
+    remove_score(user.id, amount)
+    add_score(target.id, amount)
+
+    await update.message.reply_text(
+        f"🎁 **{amount}** پوینت به {target.first_name} داده شد.",
+        parse_mode="Markdown"
+    )
+
+
+# =========================================================
+# GAMES
+# =========================================================
+
+async def games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    keyboard = [
+
+        [
+            InlineKeyboardButton(
+                "💥 انفجار",
+                callback_data="game:crash"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🪨📄✂️ سنگ کاغذ قیچی",
+                callback_data="game:rps"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "❌⭕ دوز",
+                callback_data="game:ttt"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🎲 تاس",
+                callback_data="game:dice"
+            )
+        ],
+
+        [
+            InlineKeyboardButton(
+                "🔙 بازگشت",
+                callback_data="main"
+            )
+        ]
+    ]
+
+    await update.callback_query.edit_message_text(
+        "🎮 **بازی‌های خر‌بات**\n\n"
+        "یک بازی رو انتخاب کن:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+
+# =========================================================
+# DICE GAME
+# =========================================================
+
+async def dice_game(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    user = update.effective_user
+
+    if not user:
+        return
+
+    create_user(user)
+
+    bet = 10
+
+    if get_score(user.id) < bet:
+
+        await update.message.reply_text(
+            "❌ حداقل ۱۰ پوینت لازم داری!"
+        )
+
+        return
+
+    remove_score(user.id, bet)
+
+    user_roll = random.randint(1, 6)
+    bot_roll = random.randint(1, 6)
+
+    if user_roll > bot_roll:
+
+        add_score(user.id, bet * 2)
+
+        result = f"🎉 بردی! +{bet} پوینت"
+
+    elif user_roll < bot_roll:
+
+        result = f"💀 باختی! -{bet} پوینت"
+
+    else:
+
+        add_score(user.id, bet)
+
+        result = "🤝 مساوی! شرطت برگشت."
+
+    update_quest(user.id, "game")
+
+    await update.message.reply_text(
+        f"🎲 **تاس**\n\n"
+        f"👤 تو: `{user_roll}`\n"
+        f"🤖 خر‌بات: `{bot_roll}`\n\n"
+        f"{result}\n"
+        f"💰 موجودی: **{get_score(user.id)}**",
+        parse_mode="Markdown"
+    )
+
+
+# =========================================================
+# MESSAGE HANDLER
 # =========================================================
 
 ARR_WORDS = {
@@ -509,1098 +1013,6 @@ def can_arr(user_id):
     return True
 
 
-# =========================================================
-# GAMES MENU
-# =========================================================
-
-async def games_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    keyboard = [
-        [
-            InlineKeyboardButton(
-                "🎯 حدس عدد",
-                callback_data="game:guess"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🪨 سنگ کاغذ قیچی",
-                callback_data="game:rps"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "❌⭕ دوز",
-                callback_data="game:ttt"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🎲 تاس",
-                callback_data="game:dice"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🧠 سوال اطلاعات عمومی",
-                callback_data="game:quiz"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                "🔙 بازگشت",
-                callback_data="main"
-            )
-        ]
-    ]
-
-    await update.callback_query.edit_message_text(
-        "🎮 **بازی‌های خر‌بات**\n\nیکی رو انتخاب کن:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================================================
-# DICE
-# =========================================================
-
-async def dice_game(query):
-
-    user = query.from_user
-
-    bot_number = random.randint(1, 6)
-
-    reward = bot_number * 10
-
-    add_score(user.id, reward)
-
-    update_quest(user.id, "game")
-
-    await query.edit_message_text(
-        f"""
-🎲 **تاس انداختی!**
-
-🎯 عدد: **{bot_number}**
-
-🎁 جایزه:
-+{reward} 🫏 پوینت
-""",
-        reply_markup=main_menu(user.id)
-    )
-
-
-# =========================================================
-# GUESS GAME
-# =========================================================
-
-guess_games = {}
-
-
-async def start_guess(query):
-
-    user = query.from_user
-
-    number = random.randint(1, 10)
-
-    guess_games[user.id] = number
-
-    keyboard = []
-
-    for i in range(1, 11):
-
-        keyboard.append(
-            InlineKeyboardButton(
-                str(i),
-                callback_data=f"guess:{i}"
-            )
-        )
-
-    rows = [
-        keyboard[i:i + 5]
-        for i in range(0, 10, 5)
-    ]
-
-    rows.append([
-        InlineKeyboardButton(
-            "🔙 بازی‌ها",
-            callback_data="games"
-        )
-    ])
-
-    await query.edit_message_text(
-        "🎯 **حدس عدد**\n\n"
-        "تورکعلی یک عدد بین ۱ تا ۱۰ انتخاب کرده.\n"
-        "حدست رو بزن:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(rows)
-    )
-
-
-async def guess_answer(query, number):
-
-    user = query.from_user
-
-    target = guess_games.get(user.id)
-
-    if target is None:
-        await query.answer("این بازی تموم شده!", show_alert=True)
-        return
-
-    del guess_games[user.id]
-
-    if number == target:
-
-        add_score(user.id, 100)
-        reward = "+100"
-
-        text = f"""
-🎉 **درست حدس زدی!**
-
-عدد: **{target}**
-
-🏆 {reward} 🫏 پوینت
-"""
-
-    else:
-
-        text = f"""
-😂 باختی!
-
-عدد تورکعلی **{target}** بود.
-
-دوباره شانست رو امتحان کن.
-"""
-
-    update_quest(user.id, "game")
-
-    await query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=main_menu(user.id)
-    )
-
-
-# =========================================================
-# RPS
-# =========================================================
-
-RPS = {
-    "stone": "🪨 سنگ",
-    "paper": "📄 کاغذ",
-    "scissors": "✂️ قیچی"
-}
-
-
-def rps_winner(a, b):
-
-    if a == b:
-        return "draw"
-
-    if (
-        (a == "stone" and b == "scissors") or
-        (a == "paper" and b == "stone") or
-        (a == "scissors" and b == "paper")
-    ):
-        return "user"
-
-    return "bot"
-
-
-async def start_rps(query):
-
-    keyboard = [[
-        InlineKeyboardButton(
-            "🪨 سنگ",
-            callback_data="rps:stone"
-        ),
-        InlineKeyboardButton(
-            "📄 کاغذ",
-            callback_data="rps:paper"
-        ),
-        InlineKeyboardButton(
-            "✂️ قیچی",
-            callback_data="rps:scissors"
-        )
-    ]]
-
-    await query.edit_message_text(
-        "🪨📄✂️ **سنگ کاغذ قیچی**\n\nانتخاب کن:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def rps_play(query, choice):
-
-    user = query.from_user
-
-    bot_choice = random.choice(list(RPS.keys()))
-
-    result = rps_winner(choice, bot_choice)
-
-    if result == "user":
-
-        add_score(user.id, 50)
-
-        text = "🎉 بردی!\n\n➕50 🫏 پوینت"
-
-    elif result == "bot":
-
-        remove_score(user.id, 20)
-
-        text = "💀 تورکعلی برد!\n\n➖20 🫏 پوینت"
-
-    else:
-
-        text = "🤝 مساوی شد!"
-
-    update_quest(user.id, "game")
-
-    await query.edit_message_text(
-        f"""
-🪨📄✂️ **نتیجه**
-
-👤 تو: {RPS[choice]}
-🤖 تورکعلی: {RPS[bot_choice]}
-
-{text}
-
-💰 موجودی: {get_score(user.id)}
-""",
-        parse_mode="Markdown",
-        reply_markup=main_menu(user.id)
-    )
-
-
-# =========================================================
-# QUIZ
-# =========================================================
-
-QUIZZES = [
-    ("پایتخت ایران کدام است؟", ["تهران", "شیراز", "تبریز", "کرمان"], 0),
-    ("بزرگ‌ترین سیاره منظومه شمسی کدام است؟", ["زمین", "مریخ", "مشتری", "زهره"], 2),
-    ("آب در چند درجه سانتی‌گراد می‌جوشد؟", ["50", "75", "100", "150"], 2),
-    ("کدام حیوان به سلطان جنگل معروف است؟", ["خر", "شیر", "گربه", "گرگ"], 1),
-    ("چند قاره در جهان وجود دارد؟", ["5", "6", "7", "8"], 2)
-]
-
-quiz_games = {}
-
-
-async def start_quiz(query):
-
-    user = query.from_user
-
-    question = random.choice(QUIZZES)
-
-    quiz_games[user.id] = question
-
-    text, options, correct = question
-
-    keyboard = []
-
-    for i, option in enumerate(options):
-
-        keyboard.append([
-            InlineKeyboardButton(
-                option,
-                callback_data=f"quiz:{i}"
-            )
-        ])
-
-    await query.edit_message_text(
-        f"🧠 **سؤال تورکعلی**\n\n{text}",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-async def quiz_answer(query, answer):
-
-    user = query.from_user
-
-    question = quiz_games.get(user.id)
-
-    if not question:
-        return
-
-    del quiz_games[user.id]
-
-    text, options, correct = question
-
-    if answer == correct:
-
-        add_score(user.id, 70)
-
-        result = "🎉 درست گفتی!\n➕70 پوینت"
-
-    else:
-
-        result = (
-            f"😂 اشتباه!\n"
-            f"جواب درست: **{options[correct]}**"
-        )
-
-    update_quest(user.id, "game")
-
-    await query.edit_message_text(
-        result,
-        parse_mode="Markdown",
-        reply_markup=main_menu(user.id)
-    )
-
-
-# =========================================================
-# TIC TAC TOE
-# =========================================================
-
-ttt_games = {}
-
-
-def ttt_winner(board):
-
-    lines = [
-        (0, 1, 2),
-        (3, 4, 5),
-        (6, 7, 8),
-        (0, 3, 6),
-        (1, 4, 7),
-        (2, 5, 8),
-        (0, 4, 8),
-        (2, 4, 6)
-    ]
-
-    for a, b, c in lines:
-
-        if board[a] and board[a] == board[b] == board[c]:
-            return board[a]
-
-    if "" not in board:
-        return "draw"
-
-    return None
-
-
-def ttt_keyboard(game_id, board):
-
-    rows = []
-
-    for start in range(0, 9, 3):
-
-        row = []
-
-        for i in range(start, start + 3):
-
-            symbol = board[i] if board[i] else "▫️"
-
-            row.append(
-                InlineKeyboardButton(
-                    symbol,
-                    callback_data=f"ttt:{game_id}:{i}"
-                )
-            )
-
-        rows.append(row)
-
-    return InlineKeyboardMarkup(rows)
-
-
-async def start_ttt(query):
-
-    user = query.from_user
-
-    game_id = f"{user.id}_{int(time.time())}"
-
-    board = [""] * 9
-
-    ttt_games[game_id] = {
-        "user_id": user.id,
-        "board": board
-    }
-
-    await query.edit_message_text(
-        "❌⭕ **دوز با تورکعلی**\n\nنوبت توئه:",
-        parse_mode="Markdown",
-        reply_markup=ttt_keyboard(game_id, board)
-    )
-
-
-async def ttt_move(query, game_id, position):
-
-    game = ttt_games.get(game_id)
-
-    if not game:
-        return
-
-    user = query.from_user
-
-    if user.id != game["user_id"]:
-        await query.answer("این بازی مال تو نیست!", show_alert=True)
-        return
-
-    board = game["board"]
-
-    if board[position]:
-
-        await query.answer(
-            "این خونه پره 😂",
-            show_alert=True
-        )
-
-        return
-
-    board[position] = "❌"
-
-    winner = ttt_winner(board)
-
-    if winner:
-        await finish_ttt(query, game_id, winner)
-        return
-
-    empty = [
-        i for i, value in enumerate(board)
-        if not value
-    ]
-
-    if empty:
-
-        # حرکت ساده و قابل پیش‌بینی نیست
-        bot_move = random.choice(empty)
-
-        board[bot_move] = "⭕"
-
-    winner = ttt_winner(board)
-
-    if winner:
-        await finish_ttt(query, game_id, winner)
-        return
-
-    await query.edit_message_text(
-        "❌⭕ **دوز با تورکعلی**\n\nنوبت توئه:",
-        parse_mode="Markdown",
-        reply_markup=ttt_keyboard(game_id, board)
-    )
-
-
-async def finish_ttt(query, game_id, winner):
-
-    game = ttt_games.pop(game_id, None)
-
-    if not game:
-        return
-
-    user_id = game["user_id"]
-
-    if winner == "❌":
-
-        add_score(user_id, 100)
-
-        text = "🎉 بردی!\n➕100 پوینت"
-
-    elif winner == "⭕":
-
-        remove_score(user_id, 30)
-
-        text = "😂 تورکعلی برد!\n➖30 پوینت"
-
-    else:
-
-        text = "🤝 مساوی شد!"
-
-    update_quest(user_id, "game")
-
-    await query.edit_message_text(
-        f"🏁 **پایان بازی**\n\n{text}",
-        parse_mode="Markdown",
-        reply_markup=main_menu(user_id)
-    )
-
-
-# =========================================================
-# QUESTS
-# =========================================================
-
-async def quests(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-
-    create_user(user)
-
-    cursor.execute("""
-        SELECT q_arr_count,
-               q_game_count,
-               q_ai_count
-        FROM users
-        WHERE user_id = ?
-    """, (user.id,))
-
-    row = cursor.fetchone()
-
-    arr = row["q_arr_count"]
-    game = row["q_game_count"]
-    ai = row["q_ai_count"]
-
-    text = f"""
-🎯 **ماموریت‌های امروز**
-
-🫏 ۳ بار عر:
-{arr}/3
-
-🎮 ۲ بازی:
-{game}/2
-
-🤖 ۳ پیام به تورکعلی:
-{ai}/3
-
-━━━━━━━━━━━━
-
-🎁 پاداش‌ها:
-• عر ×3 → +50
-• بازی ×2 → +100
-• AI ×3 → +50
-"""
-
-    await update.callback_query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=main_menu(user.id)
-    )
-
-
-# =========================================================
-# INVENTORY
-# =========================================================
-
-async def inventory(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-
-    create_user(user)
-
-    cursor.execute("""
-        SELECT item_name, quantity
-        FROM inventory
-        WHERE user_id = ?
-        AND quantity > 0
-    """, (user.id,))
-
-    rows = cursor.fetchall()
-
-    if not rows:
-
-        text = "🎒 **انبار خالیه!**"
-
-    else:
-
-        text = "🎒 **انبار تو**\n\n"
-
-        for row in rows:
-
-            text += (
-                f"🔹 {row['item_name']} "
-                f"× {row['quantity']}\n"
-            )
-
-    await update.callback_query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=main_menu(user.id)
-    )
-
-
-# =========================================================
-# STORE
-# =========================================================
-
-async def store(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-
-    create_user(user)
-
-    text = f"""
-🛍 **فروشگاه تورکعلی**
-
-💰 موجودی:
-**{get_score(user.id)}** 🫏 پوینت
-
-یکی رو انتخاب کن:
-"""
-
-    await update.callback_query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=store_keyboard()
-    )
-
-
-async def buy_item(query, item_id):
-
-    user = query.from_user
-
-    item = STORE_ITEMS.get(item_id)
-
-    if not item:
-        return
-
-    price = item["price"]
-
-    if get_score(user.id) < price:
-
-        await query.answer(
-            "❌ پوینت کافی نداری!",
-            show_alert=True
-        )
-
-        return
-
-    remove_score(user.id, price)
-
-    if item["type"] == "title":
-
-        cursor.execute("""
-            UPDATE users
-            SET title = ?
-            WHERE user_id = ?
-        """, (
-            item["value"],
-            user.id
-        ))
-
-    else:
-
-        cursor.execute("""
-            INSERT INTO inventory (
-                user_id,
-                item_id,
-                item_name,
-                quantity
-            )
-            VALUES (?, ?, ?, 1)
-
-            ON CONFLICT(user_id, item_id)
-            DO UPDATE SET quantity = quantity + 1
-        """, (
-            user.id,
-            item_id,
-            item["name"]
-        ))
-
-    db_commit()
-
-    await query.answer(
-        "✅ خرید موفق!",
-        show_alert=True
-    )
-
-    await query.edit_message_text(
-        f"""
-🎉 **خرید موفق!**
-
-🛍 {item['name']}
-
-💰 موجودی جدید:
-**{get_score(user.id)}** 🫏
-""",
-        parse_mode="Markdown",
-        reply_markup=store_keyboard()
-    )
-
-
-# =========================================================
-# RANKING
-# =========================================================
-
-async def ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-
-    cursor.execute("""
-        SELECT first_name, username, score
-        FROM users
-        ORDER BY score DESC
-        LIMIT 10
-    """)
-
-    rows = cursor.fetchall()
-
-    text = "🏆 **۱۰ خر پولدار برتر**\n\n"
-
-    for i, row in enumerate(rows, 1):
-
-        name = row["first_name"] or row["username"] or "Unknown"
-
-        text += (
-            f"{i}. {name} — "
-            f"**{row['score']}** 🫏\n"
-        )
-
-    await update.callback_query.edit_message_text(
-        text,
-        parse_mode="Markdown",
-        reply_markup=main_menu(user.id)
-    )
-
-
-# =========================================================
-# HELP
-# =========================================================
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-
-    text = """
-📖 **راهنمای خر‌بات**
-
-━━━━━━━━━━━━
-
-🤖 **هوش مصنوعی**
-
-پیامت رو با «خر» شروع کن:
-
-`خر خوبی؟`
-
-تورکعلی جواب میده 😂
-
-━━━━━━━━━━━━
-
-🎮 **بازی‌ها**
-
-🎯 حدس عدد
-🪨 سنگ کاغذ قیچی
-❌⭕ دوز
-🎲 تاس
-🧠 اطلاعات عمومی
-
-━━━━━━━━━━━━
-
-💰 **اقتصاد**
-
-🫏 عر → پوینت
-🎁 جایزه روزانه
-🛍 فروشگاه
-🎒 انبار
-🏆 رتبه‌بندی
-
-━━━━━━━━━━━━
-
-💸 **انتقال پوینت**
-
-روی پیام شخص ریپلای کن:
-
-`بده 100`
-
-"""
-
-    if update.callback_query:
-
-        await update.callback_query.edit_message_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=main_menu(user.id)
-        )
-
-    else:
-
-        await update.message.reply_text(
-            text,
-            parse_mode="Markdown",
-            reply_markup=main_menu(user.id)
-        )
-
-
-# =========================================================
-# GIVE SCORE
-# =========================================================
-
-async def give_score(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-
-    if not update.message.reply_to_message:
-
-        await update.message.reply_text(
-            "❌ روی پیام شخص ریپلای کن."
-        )
-
-        return
-
-    try:
-
-        amount = int(context.args[0])
-
-    except:
-
-        await update.message.reply_text(
-            "مثال:\n`/give 100`",
-            parse_mode="Markdown"
-        )
-
-        return
-
-    if amount <= 0:
-
-        return
-
-    target = update.message.reply_to_message.from_user
-
-    create_user(user)
-    create_user(target)
-
-    if user.id == target.id:
-
-        await update.message.reply_text(
-            "😂 نمی‌تونی به خودت پوینت بدی."
-        )
-
-        return
-
-    if get_score(user.id) < amount:
-
-        await update.message.reply_text(
-            "❌ موجودی کافی نداری."
-        )
-
-        return
-
-    remove_score(user.id, amount)
-    add_score(target.id, amount)
-
-    await update.message.reply_text(
-        f"✅ {amount} پوینت به "
-        f"{target.first_name} داده شد."
-    )
-
-
-# =========================================================
-# ADMIN
-# =========================================================
-
-def is_admin(user_id):
-
-    return (
-        ADMIN_ID != 0
-        and user_id == ADMIN_ID
-    )
-
-
-async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    user = update.effective_user
-
-    if not is_admin(user.id):
-
-        await update.message.reply_text(
-            "⛔ دسترسی نداری."
-        )
-
-        return
-
-    cursor.execute(
-        "SELECT COUNT(*) AS total FROM users"
-    )
-
-    total = cursor.fetchone()["total"]
-
-    text = f"""
-👑 **پنل مالک**
-
-━━━━━━━━━━━━
-
-👥 کاربران:
-**{total}**
-
-🛠 دستورات:
-
-`/addcoin ID AMOUNT`
-
-`/removecoin ID AMOUNT`
-
-`/setcoin ID AMOUNT`
-
-`/broadcast متن`
-
-`/users`
-"""
-
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown"
-    )
-
-
-async def addcoin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    try:
-
-        user_id = int(context.args[0])
-        amount = int(context.args[1])
-
-        cursor.execute(
-            "SELECT user_id FROM users WHERE user_id = ?",
-            (user_id,)
-        )
-
-        if not cursor.fetchone():
-
-            await update.message.reply_text(
-                "❌ کاربر پیدا نشد."
-            )
-
-            return
-
-        add_score(user_id, amount)
-
-        await update.message.reply_text(
-            f"✅ +{amount} پوینت"
-        )
-
-    except:
-
-        await update.message.reply_text(
-            "مثال:\n/addcoin 123456789 1000"
-        )
-
-
-async def removecoin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    try:
-
-        user_id = int(context.args[0])
-        amount = int(context.args[1])
-
-        remove_score(user_id, amount)
-
-        await update.message.reply_text(
-            f"✅ -{amount} پوینت"
-        )
-
-    except:
-
-        await update.message.reply_text(
-            "مثال:\n/removecoin 123456789 500"
-        )
-
-
-async def setcoin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    try:
-
-        user_id = int(context.args[0])
-        amount = int(context.args[1])
-
-        cursor.execute(
-            "UPDATE users SET score = ? WHERE user_id = ?",
-            (amount, user_id)
-        )
-
-        db_commit()
-
-        await update.message.reply_text(
-            f"✅ موجودی کاربر شد: {amount}"
-        )
-
-    except:
-
-        await update.message.reply_text(
-            "مثال:\n/setcoin 123456789 5000"
-        )
-
-
-async def users_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    cursor.execute("""
-        SELECT first_name, username, user_id, score
-        FROM users
-        ORDER BY score DESC
-        LIMIT 20
-    """)
-
-    rows = cursor.fetchall()
-
-    text = "👥 **کاربران**\n\n"
-
-    for row in rows:
-
-        text += (
-            f"• {row['first_name']} | "
-            f"`{row['user_id']}` | "
-            f"{row['score']} 🫏\n"
-        )
-
-    await update.message.reply_text(
-        text,
-        parse_mode="Markdown"
-    )
-
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    if not context.args:
-
-        await update.message.reply_text(
-            "مثال:\n/broadcast سلام بچه‌ها 😂"
-        )
-
-        return
-
-    message = " ".join(context.args)
-
-    cursor.execute(
-        "SELECT user_id FROM users"
-    )
-
-    users = cursor.fetchall()
-
-    sent = 0
-
-    for row in users:
-
-        try:
-
-            await context.bot.send_message(
-                chat_id=row["user_id"],
-                text=message
-            )
-
-            sent += 1
-
-            await asyncio.sleep(0.05)
-
-        except Exception as e:
-
-            print(
-                "Broadcast error:",
-                row["user_id"],
-                e
-            )
-
-    await update.message.reply_text(
-        f"📢 پیام برای {sent} نفر ارسال شد."
-    )
-
-
-# =========================================================
-# MESSAGE HANDLER
-# =========================================================
-
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not update.message:
@@ -1620,27 +1032,125 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     clean = text.strip().lower()
 
-    # -------------------------
-    # TOROKALI
-    # -------------------------
+    # -----------------------------
+    # ARR
+    # -----------------------------
 
-    if clean == "تورکعلی":
+    if clean in ARR_WORDS:
 
-        response = await ask_ai(
-            "کاربر فقط اسم تورکعلی را صدا زده. جواب بامزه بده."
+        if not can_arr(user.id):
+
+            await update.message.reply_text(
+                "⏳ یکم صبر کن بعد دوباره عر بزن 😂"
+            )
+
+            return
+
+        add_score(
+            user.id,
+            ARR_SCORE
         )
 
-        update_quest(user.id, "ai")
+        update_quest(
+            user.id,
+            "arr"
+        )
 
-        await update.message.reply_text(response)
+        await update.message.reply_text(
+            f"🫏 عررررر!\n"
+            f"+{ARR_SCORE} 🫏 پوینت"
+        )
 
         return
 
-    # -------------------------
-    # AI
-    # -------------------------
+    # -----------------------------
+    # TOROKALI
+    # -----------------------------
 
-    if clean.startswith("خر ") or clean == "خر":
+    if clean == "تورکعلی":
+
+        await update.message.reply_text(
+            "🫏 تورکعلی!"
+        )
+
+        return
+
+    # -----------------------------
+    # GIVE
+    # -----------------------------
+
+    parts = clean.split()
+
+    if (
+        len(parts) >= 2
+        and parts[0] == "بده"
+        and parts[1].isdigit()
+        and update.message.reply_to_message
+    ):
+
+        context.args = [parts[1]]
+
+        await give_coin(
+            update,
+            context
+        )
+
+        return
+
+    # -----------------------------
+    # SHOP
+    # -----------------------------
+
+    if clean in {
+        "فروشگاه",
+        "خرید"
+    }:
+
+        await update.message.reply_text(
+            "🛍️ برای فروشگاه از `/store` استفاده کن.",
+            parse_mode="Markdown"
+        )
+
+        return
+
+    # -----------------------------
+    # PROFILE
+    # -----------------------------
+
+    if clean in {
+        "پروفایل",
+        "امتیاز",
+        "موجودی"
+    }:
+
+        await show_profile(
+            update,
+            context
+        )
+
+        return
+
+    # -----------------------------
+    # QUEST
+    # -----------------------------
+
+    if clean in {
+        "ماموریت",
+        "ماموریت ها"
+    }:
+
+        await show_quests(
+            update,
+            context
+        )
+
+        return
+
+    # -----------------------------
+    # AI
+    # -----------------------------
+
+    if clean == "خر" or clean.startswith("خر "):
 
         prompt = (
             "سلام خر!"
@@ -1653,57 +1163,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             action="typing"
         )
 
-        response = await ask_ai(prompt)
+        answer = await ask_ai(prompt)
 
-        update_quest(user.id, "ai")
-
-        await update.message.reply_text(response)
-
-        return
-
-    # -------------------------
-    # ARR
-    # -------------------------
-
-    if clean in ARR_WORDS:
-
-        if not can_arr(user.id):
-
-            await update.message.reply_text(
-                "⏳ یکم صبر کن بعد دوباره عر بزن 😂"
-            )
-
-            return
-
-        add_score(user.id, ARR_SCORE)
-
-        update_quest(user.id, "arr")
-
-        await update.message.reply_text(
-            f"🫏 عرررر!\n"
-            f"➕{ARR_SCORE} پوینت"
+        update_quest(
+            user.id,
+            "ai"
         )
 
-        return
-
-    # -------------------------
-    # GIVE
-    # -------------------------
-
-    parts = clean.split()
-
-    if (
-        parts
-        and parts[0] == "بده"
-        and len(parts) >= 2
-        and parts[1].isdigit()
-    ):
-
-        context.args = [parts[1]]
-
-        await give_score(
-            update,
-            context
+        await update.message.reply_text(
+            answer
         )
 
         return
@@ -1713,7 +1181,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # CALLBACK HANDLER
 # =========================================================
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     query = update.callback_query
 
@@ -1725,49 +1193,52 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     data = query.data
 
-    # -------------------------
+    # -----------------------------
     # MAIN
-    # -------------------------
+    # -----------------------------
 
     if data == "main":
 
         await query.edit_message_text(
-            "🫏 **خر‌بات**\n\nبه قلمرو تورکعلی خوش اومدی 😂",
-            parse_mode="Markdown",
-            reply_markup=main_menu(user.id)
+            "🫏 **خر‌بات**\n\n"
+            "به قلمرو خرها خوش اومدی 😂",
+            reply_markup=main_menu(user.id),
+            parse_mode="Markdown"
         )
 
         return
 
-    # -------------------------
+    # -----------------------------
     # PROFILE
-    # -------------------------
+    # -----------------------------
 
     if data == "profile":
 
-        await profile(
+        await show_profile(
             update,
             context
         )
 
         return
 
-    # -------------------------
+    # -----------------------------
     # BALANCE
-    # -------------------------
+    # -----------------------------
 
     if data == "balance":
 
-        await balance(
-            update,
-            context
+        await query.edit_message_text(
+            f"💰 موجودی شما:\n\n"
+            f"**{get_score(user.id)}** 🫏 پوینت",
+            reply_markup=main_menu(user.id),
+            parse_mode="Markdown"
         )
 
         return
 
-    # -------------------------
+    # -----------------------------
     # GAMES
-    # -------------------------
+    # -----------------------------
 
     if data == "games":
 
@@ -1778,48 +1249,48 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # -------------------------
+    # -----------------------------
     # STORE
-    # -------------------------
+    # -----------------------------
 
     if data == "store":
 
-        await store(
+        await show_store(
             update,
             context
         )
 
         return
 
-    # -------------------------
-    # INVENTORY
-    # -------------------------
-
-    if data == "inventory":
-
-        await inventory(
-            update,
-            context
-        )
-
-        return
-
-    # -------------------------
+    # -----------------------------
     # QUESTS
-    # -------------------------
+    # -----------------------------
 
     if data == "quests":
 
-        await quests(
+        await show_quests(
             update,
             context
         )
 
         return
 
-    # -------------------------
+    # -----------------------------
+    # INVENTORY
+    # -----------------------------
+
+    if data == "inventory":
+
+        await show_inventory(
+            update,
+            context
+        )
+
+        return
+
+    # -----------------------------
     # DAILY
-    # -------------------------
+    # -----------------------------
 
     if data == "daily":
 
@@ -1830,183 +1301,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
-    # -------------------------
-    # RANKING
-    # -------------------------
-
-    if data == "ranking":
-
-        await ranking(
-            update,
-            context
-        )
-
-        return
-
-    # -------------------------
+    # -----------------------------
     # HELP
-    # -------------------------
+    # -----------------------------
 
     if data == "help":
 
-        await help_command(
+        await query.edit_message_text(
+            "📖 **راهنما**\n\n"
+            "🫏 `عر` → دریافت پوینت\n"
+            "🤖 `خر سوالت` → چت با AI\n"
+            "💰 `/daily` → جایزه روزانه\n"
+            "🎒 `/inventory` → انبار\n"
+            "🛍️ `/store` → فروشگاه\n"
+            "👑 `/admin` → پنل مالک",
+            reply_markup=main_menu(user.id),
+            parse_mode="Markdown"
+        )
+
+        return
+
+    # -----------------------------
+    # ADMIN
+    # -----------------------------
+
+    if data == "admin":
+
+        await admin_panel(
             update,
             context
         )
 
         return
 
-    # -------------------------
-    # AI
-    # -------------------------
-
-    if data == "ai":
-
-        await query.edit_message_text(
-            "🤖 **تورکعلی آماده‌ست!**\n\n"
-            "پیامت رو با «خر» شروع کن.\n\n"
-            "مثال:\n"
-            "`خر امروز چه خبر؟`",
-            parse_mode="Markdown",
-            reply_markup=main_menu(user.id)
-        )
-
-        return
-
-    # -------------------------
-    # ADMIN
-    # -------------------------
-
-    if data == "admin":
-
-        if not is_admin(user.id):
-
-            await query.answer(
-                "⛔ دسترسی نداری!",
-                show_alert=True
-            )
-
-            return
-
-        await query.edit_message_text(
-            "👑 پنل مالک:\n\n"
-            "/addcoin ID AMOUNT\n"
-            "/removecoin ID AMOUNT\n"
-            "/setcoin ID AMOUNT\n"
-            "/broadcast TEXT\n"
-            "/users",
-            reply_markup=main_menu(user.id)
-        )
-
-        return
-
-    # -------------------------
-    # GAME SELECT
-    # -------------------------
-
-    if data == "game:dice":
-
-        await dice_game(query)
-
-        return
-
-    if data == "game:guess":
-
-        await start_guess(query)
-
-        return
-
-    if data == "game:rps":
-
-        await start_rps(query)
-
-        return
-
-    if data == "game:ttt":
-
-        await start_ttt(query)
-
-        return
-
-    if data == "game:quiz":
-
-        await start_quiz(query)
-
-        return
-
-    # -------------------------
-    # GUESS
-    # -------------------------
-
-    if data.startswith("guess:"):
-
-        number = int(data.split(":")[1])
-
-        await guess_answer(
-            query,
-            number
-        )
-
-        return
-
-    # -------------------------
-    # RPS
-    # -------------------------
-
-    if data.startswith("rps:"):
-
-        choice = data.split(":")[1]
-
-        await rps_play(
-            query,
-            choice
-        )
-
-        return
-
-    # -------------------------
-    # QUIZ
-    # -------------------------
-
-    if data.startswith("quiz:"):
-
-        answer = int(
-            data.split(":")[1]
-        )
-
-        await quiz_answer(
-            query,
-            answer
-        )
-
-        return
-
-    # -------------------------
-    # TTT
-    # -------------------------
-
-    if data.startswith("ttt:"):
-
-        parts = data.split(":")
-
-        game_id = parts[1]
-        position = int(parts[2])
-
-        await ttt_move(
-            query,
-            game_id,
-            position
-        )
-
-        return
-
-    # -------------------------
-    # STORE
-    # -------------------------
+    # -----------------------------
+    # BUY
+    # -----------------------------
 
     if data.startswith("buy:"):
 
-        item_id = data.split(":")[1]
+        item_id = data.split(":", 1)[1]
 
         await buy_item(
             query,
@@ -2015,6 +1349,59 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return
 
+    # -----------------------------
+    # DICE
+    # -----------------------------
+
+    if data == "game:dice":
+
+        await query.edit_message_text(
+            "🎲 برای بازی تاس در چت بنویس:\n\n"
+            "`/dice`",
+            reply_markup=main_menu(user.id),
+            parse_mode="Markdown"
+        )
+
+        return
+
+    # -----------------------------
+    # OTHER GAMES
+    # -----------------------------
+
+    if data in {
+        "game:crash",
+        "game:rps",
+        "game:ttt"
+    }:
+
+        await query.edit_message_text(
+            "🚧 این بازی در حال آماده‌سازی نسخه جدید خر‌باته.",
+            reply_markup=main_menu(user.id)
+        )
+
+        return
+
+
+# =========================================================
+# COMMANDS
+# =========================================================
+
+async def help_command(update, context):
+
+    await update.message.reply_text(
+        "📖 **راهنمای خر‌بات**\n\n"
+        "🫏 `عر` → پوینت\n"
+        "🤖 `خر سوال` → هوش مصنوعی\n"
+        "💰 `/daily` → جایزه روزانه\n"
+        "👤 `/profile` → پروفایل\n"
+        "🛍️ `/store` → فروشگاه\n"
+        "🎒 `/inventory` → انبار\n"
+        "🎯 `/quests` → ماموریت‌ها\n"
+        "🎲 `/dice` → بازی تاس\n"
+        "🎁 ریپلای + `بده 50` → انتقال پوینت",
+        parse_mode="Markdown"
+    )
+
 
 # =========================================================
 # ERROR HANDLER
@@ -2022,9 +1409,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update, context):
 
-    print(
-        "BOT ERROR:",
-        repr(context.error)
+    logger.error(
+        "BOT ERROR: %r",
+        context.error
     )
 
 
@@ -2036,172 +1423,126 @@ def main():
 
     if not BOT_TOKEN:
 
-        print(
-            "ERROR: BOT_TOKEN تنظیم نشده."
-        )
+        print("❌ BOT_TOKEN is missing!")
 
         return
 
-    print(
-        "================================"
-    )
+    print("================================")
+    print("🫏 KHARBOT STARTING...")
+    print(f"Database: {DB_PATH}")
+    print("================================")
 
-    print(
-        "🫏 KHARBOT STARTING..."
-    )
-
-    print(
-        f"Database: {DB_PATH}"
-    )
-
-    print(
-        "================================"
-    )
-
-    app = (
-        Application.builder()
+    application = (
+        Application
+        .builder()
         .token(BOT_TOKEN)
         .build()
     )
 
-    # -------------------------
-    # COMMANDS
-    # -------------------------
+    # Commands
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "start",
             start
         )
     )
 
-    app.add_handler(
-        CommandHandler(
-            "profile",
-            profile
-        )
-    )
-
-    app.add_handler(
-        CommandHandler(
-            "daily",
-            daily
-        )
-    )
-
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "help",
             help_command
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
-            "give",
-            give_score
+            "profile",
+            show_profile
         )
     )
 
-    app.add_handler(
+    application.add_handler(
+        CommandHandler(
+            "daily",
+            daily
+        )
+    )
+
+    application.add_handler(
         CommandHandler(
             "quests",
-            quests
+            show_quests
         )
     )
 
-    app.add_handler(
-        CommandHandler(
-            "store",
-            store
-        )
-    )
-
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "inventory",
-            inventory
+            show_inventory
         )
     )
 
-    # ADMIN
+    application.add_handler(
+        CommandHandler(
+            "store",
+            show_store
+        )
+    )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "admin",
             admin_panel
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "addcoin",
-            addcoin
+            add_coin
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
             "removecoin",
-            removecoin
+            remove_coin
         )
     )
 
-    app.add_handler(
+    application.add_handler(
         CommandHandler(
-            "setcoin",
-            setcoin
+            "dice",
+            dice_game
         )
     )
 
-    app.add_handler(
-        CommandHandler(
-            "users",
-            users_command
-        )
-    )
+    # Callbacks
 
-    app.add_handler(
-        CommandHandler(
-            "broadcast",
-            broadcast
-        )
-    )
-
-    # -------------------------
-    # CALLBACKS
-    # -------------------------
-
-    app.add_handler(
+    application.add_handler(
         CallbackQueryHandler(
-            button_handler
+            callback_handler
         )
     )
 
-    # -------------------------
-    # TEXT
-    # -------------------------
+    # Messages
 
-    app.add_handler(
+    application.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             message_handler
         )
     )
 
-    app.add_error_handler(
+    application.add_error_handler(
         error_handler
     )
 
-    print(
-        "🫏 KHARBOT STARTED"
-    )
+    print("🫏 KHARBOT STARTED")
 
-    # مهم:
-    # فقط یک نمونه از ربات باید polling کند.
-    app.run_polling(
-        drop_pending_updates=True,
-        allowed_updates=Update.ALL_TYPES
+    application.run_polling(
+        drop_pending_updates=True
     )
 
 
