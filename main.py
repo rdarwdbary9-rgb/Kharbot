@@ -1,6 +1,15 @@
-# ============================================================
-# KHARBOT PRO - CHAT SOUND DETECTION (GROUP & PV) + ALL GAMES
-# ============================================================
+============================================================
+KHARBOT PRO - ULTIMATE VERSION (نسخه نهایی کامل)
+✅ ۷ بازی کامل
+✅ سیستم سطح‌بندی ۱۰ سطحی با لقب
+✅ فروشگاه ۶ بخش ۲۸ وسیله
+✅ صدای خر با ۵ کلمه کلیدی
+✅ سیستم جفت‌گیری
+✅ جایزه روزانه
+✅ جدول بر اساس تی‌تاپ
+✅ پنل ادمین کامل
+✅ ارز: تی‌تاپ (T-Top)
+============================================================
 
 import os
 import time
@@ -8,28 +17,34 @@ import random
 import sqlite3
 import logging
 import asyncio
+import itertools
+import json
 from contextlib import closing
-from dataclasses import dataclass, field
+from typing import Dict, List, Optional
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters
 
-# ============================================================
-# CONFIG & LOGGING
-# ============================================================
+============================================================
+CONFIG & LOGGING
+============================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 DB_FILE = "/tmp/kharbot.db"
-MIN_BET = 5
-START_COINS = 150
+MIN_BET = 10
+START_COINS = 2500
+MAX_PLAYERS = 10
+
+CURRENCY_NAME = "تی‌تاپ"
+CURRENCY_EMOJI = "🪙"
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger("KHARBOT")
 
-# ============================================================
-# DATABASE SETUP
-# ============================================================
+============================================================
+DATABASE SETUP
+============================================================
 
 def db_connect():
     db = sqlite3.connect(DB_FILE, timeout=20)
@@ -39,514 +54,683 @@ def db_connect():
 def init_db():
     with closing(db_connect()) as db:
         db.execute("""CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY, name TEXT NOT NULL, coins INTEGER NOT NULL DEFAULT 150,
-            level INTEGER NOT NULL DEFAULT 1, xp INTEGER NOT NULL DEFAULT 0,
-            wins INTEGER NOT NULL DEFAULT 0, losses INTEGER NOT NULL DEFAULT 0,
-            last_daily INTEGER NOT NULL DEFAULT 0, is_banned INTEGER DEFAULT 0, created_at INTEGER NOT NULL)""")
-        try: db.execute("ALTER TABLE users ADD COLUMN is_banned INTEGER DEFAULT 0")
-        except: pass
+            user_id INTEGER PRIMARY KEY,
+            name TEXT NOT NULL,
+            coins INTEGER NOT NULL DEFAULT 2500,
+            level INTEGER NOT NULL DEFAULT 1,
+            wins INTEGER NOT NULL DEFAULT 0,
+            losses INTEGER NOT NULL DEFAULT 0,
+            is_banned INTEGER DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            last_mate INTEGER DEFAULT 0,
+            babies INTEGER DEFAULT 0,
+            baby_names TEXT DEFAULT '[]',
+            last_sound INTEGER DEFAULT 0,
+            last_daily INTEGER DEFAULT 0)""")
         
         db.execute("""CREATE TABLE IF NOT EXISTS donkeys (
-            user_id INTEGER PRIMARY KEY, name TEXT NOT NULL DEFAULT 'خر من',
-            hunger INTEGER NOT NULL DEFAULT 100, thirst INTEGER NOT NULL DEFAULT 100,
-            energy INTEGER NOT NULL DEFAULT 100, happiness INTEGER NOT NULL DEFAULT 100,
-            strength INTEGER NOT NULL DEFAULT 1, speed INTEGER NOT NULL DEFAULT 1,
-            luck INTEGER NOT NULL DEFAULT 1, sounds INTEGER NOT NULL DEFAULT 1,
+            user_id INTEGER PRIMARY KEY,
+            equipped_hat TEXT DEFAULT '',
+            equipped_saddle TEXT DEFAULT '',
+            equipped_horseshoe TEXT DEFAULT '',
+            equipped_tie TEXT DEFAULT '',
+            equipped_clothes TEXT DEFAULT '',
+            equipped_accessory TEXT DEFAULT '',
             FOREIGN KEY(user_id) REFERENCES users(user_id))""")
-        db.execute("""CREATE TABLE IF NOT EXISTS inventory (
-            user_id INTEGER NOT NULL, item TEXT NOT NULL, amount INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY(user_id, item))""")
         db.commit()
 
-# ============================================================
-# USER & COIN MANAGEMENT
-# ============================================================
+============================================================
+USER MANAGEMENT
+============================================================
 
 def ensure_user(user_id, name="Player"):
     now = int(time.time())
     with closing(db_connect()) as db:
         row = db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if not row:
-            db.execute("INSERT INTO users (user_id, name, coins, created_at) VALUES (?, ?, ?, ?)", (user_id, name[:100], START_COINS, now))
+            db.execute("INSERT INTO users (user_id, name, coins, created_at) VALUES (?, ?, ?, ?)",
+                      (user_id, name[:100], START_COINS, now))
             db.execute("INSERT INTO donkeys (user_id) VALUES (?)", (user_id,))
         else:
             db.execute("UPDATE users SET name = ? WHERE user_id = ?", (name[:100], user_id))
         db.commit()
 
 def get_user(user_id):
-    with closing(db_connect()) as db: return db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
+    with closing(db_connect()) as db:
+        return db.execute("SELECT * FROM users WHERE user_id = ?", (user_id,)).fetchone()
 
 def get_donkey(user_id):
-    with closing(db_connect()) as db: return db.execute("SELECT * FROM donkeys WHERE user_id = ?", (user_id,)).fetchone()
+    with closing(db_connect()) as db:
+        return db.execute("SELECT * FROM donkeys WHERE user_id = ?", (user_id,)).fetchone()
 
 def add_coins(user_id, amount):
     if amount <= 0: return False
     with closing(db_connect()) as db:
         db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (amount, user_id))
         db.commit()
+        update_level(user_id)
     return True
 
 def remove_coins(user_id, amount):
     if amount <= 0: return False
     with closing(db_connect()) as db:
         row = db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        if not row or row["coins"] < amount: return False
+        if not row or row["coins"] < amount:
+            return False
         db.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (amount, user_id))
         db.commit()
+        update_level(user_id)
     return True
 
-def add_xp(user_id, amount):
-    if amount <= 0: return
-    with closing(db_connect()) as db:
-        row = db.execute("SELECT level, xp FROM users WHERE user_id = ?", (user_id,)).fetchone()
-        if not row: return
-        level, xp = row["level"], row["xp"] + amount
-        while xp >= 100 + ((level - 1) * 75):
-            xp -= 100 + ((level - 1) * 75)
-            level += 1
-        db.execute("UPDATE users SET level = ?, xp = ? WHERE user_id = ?", (level, xp, user_id))
-        db.commit()
-
 def record_win(user_id):
-    with closing(db_connect()) as db: db.execute("UPDATE users SET wins = wins + 1 WHERE user_id = ?", (user_id,)); db.commit()
-    add_xp(user_id, 25)
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET wins = wins + 1 WHERE user_id = ?", (user_id,))
+        db.commit()
+    update_level(user_id)
 
 def record_loss(user_id):
-    with closing(db_connect()) as db: db.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (user_id,)); db.commit()
-    add_xp(user_id, 5)
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (user_id,))
+        db.commit()
+    update_level(user_id)
 
-# ============================================================
-# GAMES CONFIG & ROOMS
-# ============================================================
+def update_level(user_id):
+    with closing(db_connect()) as db:
+        row = db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        if not row: return
+        coins = row["coins"]
+        if coins < 5000: level = 1
+        elif coins < 15000: level = 2
+        elif coins < 30000: level = 3
+        elif coins < 60000: level = 4
+        elif coins < 100000: level = 5
+        elif coins < 200000: level = 6
+        elif coins < 500000: level = 7
+        elif coins < 1000000: level = 8
+        elif coins < 5000000: level = 9
+        else: level = 10
+        db.execute("UPDATE users SET level = ? WHERE user_id = ?", (level, user_id))
+        db.commit()
 
-GAME_NAMES = {
-    "دوز": "❌⭕️ دوز (تیک‌تک‌تو تعاملی)",
-    "سنگ_کاغذ_قیچی": "✌️✊✋ سنگ، کاغذ، قیچی (تعاملی)",
-    "کارت_31": "🃏 بازی 31 (تعاملی با کارت کشیدن)",
-    "لگد_خر": "🐴💥 لگد خر (بتل رویال تعاملی)",
-    "انفجار": "💥 بازی زنده انفجار (Crash)",
+============================================================
+TITLE SYSTEM
+============================================================
+
+def get_title_by_level(level):
+    titles = {
+        1: "🐣 کره‌خر تازه‌کار",
+        2: "🐴 خر کارآموز",
+        3: "🐴 خر ماهر",
+        4: "🐴 خر حرفه‌ای",
+        5: "🐴 خر استاد",
+        6: "🦄 تک‌شاخ افسانه‌ای",
+        7: "🐉 اژدهای زرین",
+        8: "🌟 خر ستاره‌ای",
+        9: "☀️ خر کهکشانی",
+        10: "👑 خدا خرها"
+    }
+    return titles.get(level, "🐣 کره‌خر تازه‌کار")
+
+============================================================
+PROFILE
+============================================================
+
+def profile_text(user_id):
+    u = get_user(user_id)
+    if not u:
+        return "❌ کاربر یافت نشد."
+    
+    level = u["level"]
+    title = get_title_by_level(level)
+    donkey = get_donkey(user_id)
+    babies = json.loads(u["baby_names"]) if u["baby_names"] else []
+    
+    # وسایل فعال
+    equipped_parts = []
+    if donkey:
+        if donkey["equipped_hat"]: equipped_parts.append(f"🎩 {donkey['equipped_hat']}")
+        if donkey["equipped_saddle"]: equipped_parts.append(f"🐴 {donkey['equipped_saddle']}")
+        if donkey["equipped_horseshoe"]: equipped_parts.append(f"👟 {donkey['equipped_horseshoe']}")
+        if donkey["equipped_tie"]: equipped_parts.append(f"👔 {donkey['equipped_tie']}")
+        if donkey["equipped_clothes"]: equipped_parts.append(f"👕 {donkey['equipped_clothes']}")
+        if donkey["equipped_accessory"]: equipped_parts.append(f"🎀 {donkey['equipped_accessory']}")
+    
+    msg = (
+        f"{title} 👤 **پروفایل {u['name']}**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"⭐ سطح: {level}\n"
+        f"🪙 {CURRENCY_NAME}: {u['coins']:,}\n"
+        f"🏆 برد: {u['wins']} | 💀 باخت: {u['losses']}\n"
+    )
+    
+    if equipped_parts:
+        msg += f"\n🎀 **وسایل فعال:**\n"
+        for part in equipped_parts:
+            msg += f"{part}\n"
+    else:
+        msg += f"\n🎀 **وسایل فعال:** هیچ"
+    
+    if babies:
+        msg += f"\n👶 **کره‌خرها:** {len(babies)} عدد\n"
+        for i, baby in enumerate(babies[:3], 1):
+            msg += f"{i}. {baby}\n"
+        if len(babies) > 3:
+            msg += f"... و {len(babies)-3} عدد دیگر"
+    else:
+        msg += f"\n👶 **کره‌خرها:** هیچ"
+    
+    return msg
+
+============================================================
+DAILY REWARD
+============================================================
+
+DAILY_COOLDOWN = 86400
+DAILY_MIN = 100
+DAILY_MAX = 500
+
+async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    u = get_user(user.id)
+    if not u: return
+    
+    last_daily = u.get("last_daily", 0)
+    now = int(time.time())
+    
+    if now - last_daily < DAILY_COOLDOWN:
+        remaining = DAILY_COOLDOWN - (now - last_daily)
+        hours = remaining // 3600
+        minutes = (remaining % 3600) // 60
+        return await update.message.reply_text(
+            f"⏳ {hours} ساعت و {minutes} دقیقه مونده تا جایزه روزانه بعدی! 🎁"
+        )
+    
+    reward = random.randint(DAILY_MIN, DAILY_MAX)
+    bonus = ""
+    if random.random() < 0.10:
+        extra = random.randint(50, 200)
+        reward += extra
+        bonus = f"\n🎉 **جایزه ویژه!** +{extra} {CURRENCY_NAME}"
+    
+    add_coins(user.id, reward)
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET last_daily = ? WHERE user_id = ?", (now, user.id))
+        db.commit()
+    
+    await update.message.reply_text(
+        f"🎁 **جایزه روزانه!**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"👤 {user.first_name} عزیز\n"
+        f"💰 جایزه: **{reward}** {CURRENCY_NAME} {CURRENCY_EMOJI}"
+        f"{bonus}\n"
+        f"\n📅 فردا دوباره برمی‌گردی! 🐴",
+        parse_mode="Markdown"
+    )
+
+============================================================
+DONKEY SOUND SYSTEM
+============================================================
+
+SOUND_KEYWORDS = {
+    "عر": {"emoji": "🐴", "sound": "عر عر عر", "desc": "صدای معمولی خر"},
+    "عرعر": {"emoji": "🐴", "sound": "عر عر عر عر", "desc": "صدای پشت سر هم"},
+    "عرر": {"emoji": "🐴", "sound": "عررررررر", "desc": "صدای کشیده"},
+    "ترک": {"emoji": "💨", "sound": "عر-عر-عر-عر (ترک!)", "desc": "صدای شکسته"},
+    "تورک": {"emoji": "🌀", "sound": "عررررررررر (تورک!)", "desc": "صدای پیچیده"}
 }
 
-ACTIVE_GAMES = {}
-PLAYER_GAMES = {}
-USER_GAME_SELECTION = {} 
-CRASH_SESSIONS = {} 
+SOUND_COOLDOWN = 120
+MIN_REWARD = 0
+MAX_REWARD = 20
+
+async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text.strip()
+    ensure_user(user.id, user.first_name)
+    u = get_user(user.id)
+    if not u: return
+    
+    last_sound = u.get("last_sound", 0)
+    now = int(time.time())
+    
+    if now - last_sound < SOUND_COOLDOWN:
+        remaining = SOUND_COOLDOWN - (now - last_sound)
+        minutes = remaining // 60
+        seconds = remaining % 60
+        return await update.message.reply_text(
+            f"⏳ {minutes} دقیقه و {seconds} ثانیه صبر کن تا دوباره صدا بدی! 🐴"
+        )
+    
+    keyword = None
+    for key in SOUND_KEYWORDS.keys():
+        if key in text:
+            keyword = key
+            break
+    
+    if not keyword:
+        return
+    
+    sound_info = SOUND_KEYWORDS[keyword]
+    reward = random.randint(MIN_REWARD, MAX_REWARD)
+    bonus = ""
+    
+    if random.random() < 0.05:
+        reward = random.randint(20, 50)
+        bonus = "\n🎉 **جایزه ویژه!**"
+    
+    if reward > 0:
+        add_coins(user.id, reward)
+    
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET last_sound = ? WHERE user_id = ?", (now, user.id))
+        db.commit()
+    
+    await update.message.reply_text(
+        f"{sound_info['emoji']} **صدای خر!**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🎤 {sound_info['sound']}\n"
+        f"📝 {sound_info['desc']}\n"
+        f"\n👤 {user.first_name} عر کشید! 🐴\n"
+        f"💰 جایزه: **{reward}** {CURRENCY_NAME} {CURRENCY_EMOJI}"
+        f"{bonus}",
+        parse_mode="Markdown"
+    )
+
+============================================================
+MATING SYSTEM
+============================================================
+
+MATE_COST = 500
+MAX_BABIES = 5
+MATE_COOLDOWN = 86400
+
+async def mate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    
+    if not update.message.reply_to_message:
+        return await update.message.reply_text(
+            "❌ روی پیام شخص مورد نظر **ریپلی (Reply)** بزن و سپس `جفت‌گیری` رو تایپ کن.",
+            parse_mode="Markdown"
+        )
+    
+    target = update.message.reply_to_message.from_user
+    target_id = target.id
+    
+    if user.id == target_id:
+        return await update.message.reply_text("❌ نمی‌تونی با خودت جفت‌گیری کنی! 😂")
+    
+    ensure_user(target_id, target.first_name)
+    u1 = get_user(user.id)
+    u2 = get_user(target_id)
+    
+    if u1["level"] < 2:
+        return await update.message.reply_text(f"❌ {user.first_name} عزیز، سطح تو {u1['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسی! 🐣")
+    
+    if u2["level"] < 2:
+        return await update.message.reply_text(f"❌ {target.first_name} عزیز، سطحش {u2['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسه! 🐣")
+    
+    if u1["coins"] < MATE_COST:
+        return await update.message.reply_text(f"❌ {user.first_name} {MATE_COST} {CURRENCY_NAME} نداری! 💸")
+    if u2["coins"] < MATE_COST:
+        return await update.message.reply_text(f"❌ {target.first_name} {MATE_COST} {CURRENCY_NAME} نداره! 💸")
+    
+    babies1 = json.loads(u1["baby_names"]) if u1["baby_names"] else []
+    babies2 = json.loads(u2["baby_names"]) if u2["baby_names"] else []
+    
+    if len(babies1) >= MAX_BABIES:
+        return await update.message.reply_text(f"❌ {user.first_name} دیگه جا برای کره‌خر جدید نداری! (حداکثر {MAX_BABIES})")
+    if len(babies2) >= MAX_BABIES:
+        return await update.message.reply_text(f"❌ {target.first_name} دیگه جا برای کره‌خر جدید نداره! (حداکثر {MAX_BABIES})")
+    
+    now = int(time.time())
+    if now - u1["last_mate"] < MATE_COOLDOWN:
+        remaining = (MATE_COOLDOWN - (now - u1["last_mate"])) // 3600
+        return await update.message.reply_text(f"⏳ {user.first_name} عزیز، {remaining} ساعت دیگه می‌تونی جفت‌گیری کنی!")
+    if now - u2["last_mate"] < MATE_COOLDOWN:
+        remaining = (MATE_COOLDOWN - (now - u2["last_mate"])) // 3600
+        return await update.message.reply_text(f"⏳ {target.first_name} عزیز، {remaining} ساعت دیگه می‌تونه جفت‌گیری کنه!")
+    
+    remove_coins(user.id, MATE_COST)
+    remove_coins(target_id, MATE_COST)
+    
+    baby_names = ["🐣 کره‌خر کوچولو", "🐣 کره‌خر نازنین", "🐣 کره‌خر خوشگل", "🐣 کره‌خر بازیگوش", "🐣 کره‌خر شیطون"]
+    baby_name = random.choice(baby_names)
+    
+    babies1.append(baby_name)
+    babies2.append(baby_name)
+    
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET baby_names = ?, babies = babies + 1, last_mate = ? WHERE user_id = ?",
+                  (json.dumps(babies1), now, user.id))
+        db.execute("UPDATE users SET baby_names = ?, babies = babies + 1, last_mate = ? WHERE user_id = ?",
+                  (json.dumps(babies2), now, target_id))
+        db.commit()
+    
+    await update.message.reply_text(
+        f"🎉 **تبریک! جفت‌گیری موفق!**\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"👫 {user.first_name} ❤️ {target.first_name}\n\n"
+        f"🐣 **کره‌خر متولد شد:** {baby_name}\n"
+        f"👶 تعداد کره‌خرهای {user.first_name}: {len(babies1)}\n"
+        f"👶 تعداد کره‌خرهای {target.first_name}: {len(babies2)}\n\n"
+        f"💸 هزینه: {MATE_COST} {CURRENCY_NAME} از هر نفر",
+        parse_mode="Markdown"
+    )
+
+============================================================
+GAME NAMES
+============================================================
+
+GAME_NAMES = {
+    "rps": "✊✋✌️ سنگ-کاغذ-قیچی",
+    "blackjack": "🃏 بلک‌جک ۲۱",
+    "crash": "💥 انفجار",
+    "poker": "🎰 پوکر",
+    "ttt": "❌⭕ دوز",
+    "dice": "🎲 تاس",
+    "roulette": "🔫 رولت روسی"
+}
+
+GAME_MAX_PLAYERS = {
+    "rps": 2,
+    "blackjack": 6,
+    "crash": 10,
+    "poker": 6,
+    "ttt": 2,
+    "dice": 10,
+    "roulette": 10
+}
+
+GAME_HANDLERS = {}
+
+# ===== GAME PLACEHOLDER (برای جلوگیری از خطا) =====
+
+async def game_placeholder(room, context):
+    await context.bot.edit_message_text(
+        "🎮 این بازی در حال توسعه است!",
+        chat_id=room.chat_id,
+        message_id=room.message_id
+    )
+
+for game in GAME_NAMES.keys():
+    GAME_HANDLERS[game] = game_placeholder
+
+============================================================
+ROOM MANAGEMENT
+============================================================
+
+ACTIVE_ROOMS = {}
+PLAYER_IN_GAME = {}
 
 @dataclass
 class GameRoom:
+    room_id: str
     game_type: str
     chat_id: int
     creator_id: int
     bet: int
-    max_players: int = 2 
+    max_players: int
     players: list = field(default_factory=list)
     started: bool = False
-    against_bot: bool = False
-    created_at: float = field(default_factory=time.time)
-    game_state: dict = field(default_factory=dict)
+    game_data: dict = field(default_factory=dict)
     message_id: int = 0
+    created_at: float = field(default_factory=time.time)
 
-def get_room(chat_id): return ACTIVE_GAMES.get(str(chat_id))
-def player_in_game(user_id): return user_id in PLAYER_GAMES
-def remove_room(room):
-    ACTIVE_GAMES.pop(str(room.chat_id), None)
-    for p in room.players:
-        if p != -1: PLAYER_GAMES.pop(p, None)
+def get_room(room_id: str):
+    return ACTIVE_ROOMS.get(room_id)
 
-def get_p_name(p_id):
-    if p_id == -1: return "🤖 بات هوشمند"
-    u = get_user(p_id)
-    return u["name"] if u else f"بازیکن {p_id}"
+def cleanup_room(room_id: str):
+    room = ACTIVE_ROOMS.pop(room_id, None)
+    if room:
+        for p in room.players:
+            PLAYER_IN_GAME.pop(p, None)
 
-# موتور زنده انفجار
-async def run_crash_task(bot, chat_id, message_id, user_id, session):
-    crash_point = session["crash_point"]
-    step = 1
-    while session.get("active") and session["current"] < crash_point:
-        await asyncio.sleep(1.5)
-        if not session.get("active"): break
-        session["current"] += random.uniform(0.05, 0.25) * step
-        if session["current"] > crash_point: session["current"] = crash_point
-            
-        if session["current"] >= crash_point:
-            session["active"] = False
-            record_loss(user_id)
-            msg = f"💥 **بـــوم! انفجار!**\n━━━━━━━━━━━━━━\nمتأسفانه ضریب در **{crash_point:.2f}x** بسته شد و شرطت سوخت! 📉\n💸 باخت: {session['bet']} 🪙"
-            try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=message_id, reply_markup=main_menu())
-            except: pass
-            break
-        else:
-            current_prize = int(session["bet"] * session["current"])
-            msg = f"💥 **بازی زنده انفجار**\n━━━━━━━━━━━━━━\n💰 شرط: {session['bet']} 🪙\n📈 ضریب فعلی: **{session['current']:.2f}x**\n⚠️ سریع برداشت کن!"
-            btn = InlineKeyboardMarkup([[InlineKeyboardButton(f"🛑 برداشت ({current_prize:,} 🪙)", callback_data=f"crashout_{user_id}")]])
-            try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=message_id, reply_markup=btn)
-            except: pass
-        step += 1
+def create_room(chat_id: int, game_type: str, creator_id: int, bet: int) -> GameRoom:
+    room_id = f"{chat_id}_{int(time.time())}"
+    room = GameRoom(
+        room_id=room_id,
+        game_type=game_type,
+        chat_id=chat_id,
+        creator_id=creator_id,
+        bet=bet,
+        max_players=GAME_MAX_PLAYERS.get(game_type, 6),
+        players=[creator_id]
+    )
+    ACTIVE_ROOMS[room_id] = room
+    PLAYER_IN_GAME[creator_id] = room_id
+    return room
 
-# ============================================================
-# INTERACTIVE GAMES BUILDERS & TIMERS (30s LIMIT)
-# ============================================================
-
-def build_tictactoe_ui(room):
-    board = room.game_state["board"]
-    turn = room.game_state["turn"]
-    strikes = room.game_state["strikes"]
-    p1, p2 = room.players[0], room.players[1]
-    
-    msg = f"❌⭕️ **بازی دوز تعاملی (۳۰ ثانیه نوبت)**\n━━━━━━━━━━━━━━\n💰 شرط کل: {room.bet * len(room.players)} 🪙\n\n"
-    msg += f"❌ {get_p_name(p1)} (اخطار: {strikes[p1]}/2)\n"
-    msg += f"⭕️ {get_p_name(p2)} (اخطار: {strikes[p2]}/2)\n\n"
-    msg += f"⏳ **نوبت حرکت:** {get_p_name(turn)}"
-    
-    keyboard = []
-    for i in range(0, 9, 3):
-        row = []
-        for j in range(3):
-            idx = i + j
-            text = board[idx] if board[idx] != " " else "⬜️"
-            if board[idx] == " ": row.append(InlineKeyboardButton(text, callback_data=f"t3_{idx}"))
-            else: row.append(InlineKeyboardButton(text, callback_data="t3_ignore"))
-        keyboard.append(row)
-    return msg, InlineKeyboardMarkup(keyboard)
-
-def check_tictactoe_winner(board):
-    win_cond = [(0,1,2),(3,4,5),(6,7,8),(0,3,6),(1,4,7),(2,5,8),(0,4,8),(2,4,6)]
-    for a,b,c in win_cond:
-        if board[a] != " " and board[a] == board[b] == board[c]: return board[a]
-    if " " not in board: return "DRAW"
-    return None
-
-async def tictactoe_timer_task(bot, chat_id, expected_turn_num, current_player):
-    await asyncio.sleep(30)
-    room = get_room(chat_id)
-    if not room or room.game_type != "دوز" or not room.started: return
-    
-    if room.game_state["turn_num"] == expected_turn_num:
-        room.game_state["strikes"][current_player] += 1
-        other_player = room.players[1] if room.players[0] == current_player else room.players[0]
-        
-        if room.game_state["strikes"][current_player] >= 2:
-            prize = int((room.bet * len(room.players)) * 0.95)
-            if other_player != -1:
-                add_coins(other_player, prize)
-                record_win(other_player)
-            record_loss(current_player)
-            msg = f"❌⭕️ **پایان بازی دوز**\n💀 {get_p_name(current_player)} به دلیل عدم فعالیت حذف شد!\n🏆 **{get_p_name(other_player)} برنده شد!**\n🪙 جایزه: {prize} سکه"
-            remove_room(room)
-            try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=main_menu())
-            except: pass
-        else:
-            room.game_state["turn"] = other_player
-            room.game_state["turn_num"] += 1
-            msg, kb = build_tictactoe_ui(room)
-            msg += f"\n\n⚠️ {get_p_name(current_player)} یک نوبت را به دلیل تاخیر از دست داد!"
-            try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=kb)
-            except: pass
-            
-            if other_player == -1:
-                await handle_tictactoe_bot(bot, room, chat_id)
-            else:
-                asyncio.create_task(tictactoe_timer_task(bot, chat_id, room.game_state["turn_num"], other_player))
-
-async def handle_tictactoe_bot(bot, room, chat_id):
-    await asyncio.sleep(1.5)
-    if not room.started: return
-    empty_cells = [i for i, val in enumerate(room.game_state["board"]) if val == " "]
-    if empty_cells:
-        bot_idx = random.choice(empty_cells)
-        room.game_state["board"][bot_idx] = "⭕️"
-        winner = check_tictactoe_winner(room.game_state["board"])
-        if winner:
-            record_loss(room.players[0])
-            msg = f"🤖 **بات هوشمند در دوز برد!** سکه‌هات پر!"
-            remove_room(room)
-            try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=main_menu())
-            except: pass
-            return
-        room.game_state["turn"] = room.players[0]
-        room.game_state["turn_num"] += 1
-        msg, kb = build_tictactoe_ui(room)
-        try: 
-            m = await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=kb)
-            room.message_id = m.message_id
-        except: pass
-        asyncio.create_task(tictactoe_timer_task(bot, chat_id, room.game_state["turn_num"], room.players[0]))
-
-def build_rps_ui(room):
-    p1, p2 = room.players[0], room.players[1]
-    choices = room.game_state["choices"]
-    status_p1 = "✅ انتخاب کرد" if choices.get(p1) else "⏳ در حال انتخاب..."
-    status_p2 = "✅ انتخاب کرد" if choices.get(p2) else "⏳ در حال انتخاب..."
-    
-    msg = f"✌️✊✋ **سنگ، کاغذ، قیچی تعاملی (۳۰ ثانیه)**\n━━━━━━━━━━━━━━\n💰 شرط: {room.bet * 2} 🪙\n\n"
-    msg += f"▪️ {get_p_name(p1)}: {status_p1}\n▪️ {get_p_name(p2)}: {status_p2}\n\n👇 روی دکمه‌ی دلخواه کلیک کن:"
-    kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton("سنگ 🗿", callback_data="rps_سنگ"),
-        InlineKeyboardButton("کاغذ 📄", callback_data="rps_کاغذ"),
-        InlineKeyboardButton("قیچی ✂️", callback_data="rps_قیچی")
-    ]])
-    return msg, kb
-
-async def rps_timer_task(bot, chat_id, expected_round):
-    await asyncio.sleep(30)
-    room = get_room(chat_id)
-    if not room or room.game_type != "سنگ_کاغذ_قیچی" or not room.started: return
-    
-    if room.game_state.get("round") == expected_round:
-        choices = room.game_state["choices"]
-        p1, p2 = room.players[0], room.players[1]
-        
-        if not choices.get(p1) and choices.get(p2): winner = p2
-        elif choices.get(p1) and not choices.get(p2): winner = p1
-        else: winner = "DRAW"
-            
-        prize = int((room.bet * 2) * 0.95)
-        if winner == "DRAW":
-            for p in room.players:
-                if p != -1: add_coins(p, room.bet)
-            msg = "🤝 **تایم‌اوت / مساوی!** سکه‌ها برگشت."
-        else:
-            loser = p2 if winner == p1 else p1
-            if winner != -1: add_coins(winner, prize); record_win(winner)
-            if loser != -1: record_loss(loser)
-            msg = f"🏆 **{get_p_name(winner)} به دلیل عدم پاسخ‌دهی حریف برنده شد!**\n🪙 جایزه: {prize} سکه"
-            
-        remove_room(room)
-        try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=main_menu())
-        except: pass
-
-def build_card31_ui(room):
-    turn = room.game_state["turn"]
-    scores = room.game_state["scores"]
-    lives = room.game_state["lives"]
-    
-    msg = f"🃏 **بازی ۳۱ تعاملی (نوبتی و ۳۰ ثانیه)**\n━━━━━━━━━━━━━━\n💰 شرط: {room.bet * len(room.players)} 🪙\n\n"
-    for p in room.players:
-        msg += f"▪️ {get_p_name(p)} ➔ امتیاز: {scores.get(p, 0)} | جون: {'❤️' * lives.get(p, 3)}\n"
-    msg += f"\n⏳ **نوبت کشیدن کارت:** {get_p_name(turn)}"
-    
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🃏 کشیدن کارت", callback_data="c31_draw"), InlineKeyboardButton("🛑 ایست", callback_data="c31_pass")]
-    ])
-    return msg, kb
-
-async def card31_timer_task(bot, chat_id, expected_turn_num, current_player):
-    await asyncio.sleep(30)
-    room = get_room(chat_id)
-    if not room or room.game_type != "کارت_31" or not room.started: return
-    
-    if room.game_state["turn_num"] == expected_turn_num:
-        room.game_state["lives"][current_player] -= 1
-        other_player = room.players[1] if room.players[0] == current_player else room.players[0]
-        
-        if room.game_state["lives"][current_player] <= 0:
-            prize = int((room.bet * len(room.players)) * 0.95)
-            if other_player != -1: add_coins(other_player, prize); record_win(other_player)
-            record_loss(current_player)
-            msg = f"🃏 **پایان بازی ۳۱**\n💀 {get_p_name(current_player)} به دلیل تاخیر ۳۰ ثانیه‌ای باخت!\n🏆 **{get_p_name(other_player)} برنده شد!**"
-            remove_room(room)
-            try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=main_menu())
-            except: pass
-        else:
-            room.game_state["turn"] = other_player
-            room.game_state["turn_num"] += 1
-            msg, kb = build_card31_ui(room)
-            msg += f"\n\n⚠️ {get_p_name(current_player)} به دلیل تاخیر ۱ جون از دست داد!"
-            try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=kb)
-            except: pass
-            
-            if other_player == -1:
-                await handle_card31_bot(bot, room, chat_id)
-            else:
-                asyncio.create_task(card31_timer_task(bot, chat_id, room.game_state["turn_num"], other_player))
-
-async def handle_card31_bot(bot, room, chat_id):
-    await asyncio.sleep(2)
-    if not room.started: return
-    bot_card = random.randint(3, 9)
-    room.game_state["scores"][-1] += bot_card
-    
-    if room.game_state["scores"][-1] >= 26 or random.random() < 0.4:
-        user_id = room.players[0]
-        user_score = room.game_state["scores"][user_id]
-        bot_score = room.game_state["scores"][-1]
-        
-        prize = int((room.bet * 2) * 0.95)
-        if user_score > bot_score:
-            winner, loser = user_id, -1
-            msg = f"🃏 **بات ایست داد!** امتیاز بات: {bot_score} | امتیاز شما: {user_score}\n🏆 **شما برنده شدید!**\n🪙 جایزه: {prize} سکه"
-        else:
-            winner, loser = -1, user_id
-            msg = f"🃏 **بات ایست داد!** امتیاز بات: {bot_score} | امتیاز شما: {user_score}\n🤖 **بات برنده شد!**"
-            
-        if winner != -1: add_coins(winner, prize); record_win(winner)
-        if loser != -1: record_loss(loser)
-        remove_room(room)
-        try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=main_menu())
-        except: pass
-    else:
-        room.game_state["turn"] = room.players[0]
-        room.game_state["turn_num"] += 1
-        msg, kb = build_card31_ui(room)
-        try:
-            m = await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=kb)
-            room.message_id = m.message_id
-        except: pass
-        asyncio.create_task(card31_timer_task(bot, chat_id, room.game_state["turn_num"], room.players[0]))
-
-def build_donkey_ui(room):
-    turn = room.game_state["turn"]
-    strikes = room.game_state["strikes"]
-    
-    msg = f"🐴💥 **لگد خر تعاملی (بقا - ۳۰ ثانیه)**\n━━━━━━━━━━━━━━\n💰 شرط کل: {room.bet * len(room.players)} 🪙\n\n"
-    for p in room.players:
-        msg += f"▪️ {get_p_name(p)} ➔ اخطار لگد: {strikes.get(p, 0)}/3\n"
-    msg += f"\n⏳ **نوبت تست شانس:** {get_p_name(turn)}"
-    
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("🐴 جفت پا جلو رفتن (تست شانس)", callback_data="dk_kick")]
-    ])
-    return msg, kb
-
-async def donkey_timer_task(bot, chat_id, expected_turn_num, current_player):
-    await asyncio.sleep(30)
-    room = get_room(chat_id)
-    if not room or room.game_type != "لگد_خر" or not room.started: return
-    
-    if room.game_state["turn_num"] == expected_turn_num:
-        room.game_state["strikes"][current_player] += 1
-        other_player = room.players[1] if room.players[0] == current_player else room.players[0]
-        
-        if room.game_state["strikes"][current_player] >= 2:
-            prize = int((room.bet * len(room.players)) * 0.95)
-            if other_player != -1: add_coins(other_player, prize); record_win(other_player)
-            record_loss(current_player)
-            msg = f"🐴💥 **پایان لگد خر**\n💀 {get_p_name(current_player)} به دلیل تاخیر حذف شد!\n🏆 **{get_p_name(other_player)} برنده شد!**"
-            remove_room(room)
-            try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=main_menu())
-            except: pass
-        else:
-            room.game_state["turn"] = other_player
-            room.game_state["turn_num"] += 1
-            msg, kb = build_donkey_ui(room)
-            msg += f"\n\n⚠️ {get_p_name(current_player)} به دلیل تاخیر نوبتش سوخت!"
-            try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=kb)
-            except: pass
-            
-            if other_player == -1:
-                await handle_donkey_bot(bot, room, chat_id)
-            else:
-                asyncio.create_task(donkey_timer_task(bot, chat_id, room.game_state["turn_num"], other_player))
-
-async def handle_donkey_bot(bot, room, chat_id):
-    await asyncio.sleep(2)
-    if not room.started: return
-    hit = random.random() < 0.45
-    user_id = room.players[0]
-    if hit:
-        prize = int((room.bet * 2) * 0.95)
-        add_coins(user_id, prize); record_win(user_id)
-        record_loss(-1)
-        msg = f"🐴 **خر جفتک انداخت تو صورت بات!** 💥\n🤖 بات لگد خورد و باخت!\n🏆 **شما برنده شدید!**\n🪙 جایزه: {prize} سکه"
-        remove_room(room)
-        try: await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=main_menu())
-        except: pass
-    else:
-        room.game_state["turn"] = user_id
-        room.game_state["turn_num"] += 1
-        msg, kb = build_donkey_ui(room)
-        msg += f"\n\n🐴 خر به بات لگد نزد! نوبت شماست:"
-        try:
-            m = await bot.edit_message_text(msg, chat_id=chat_id, message_id=room.message_id, reply_markup=kb)
-            room.message_id = m.message_id
-        except: pass
-        asyncio.create_task(donkey_timer_task(bot, chat_id, room.game_state["turn_num"], user_id))
-
-# ============================================================
-# SOUND & SCORING SYSTEM (GROUP TEXT & MANUAL)
-# ============================================================
-
-DONKEY_SOUNDS_DB = [
-    {"words": ["عر", "عرعر", "ar"], "text": "عررررررررر اصیل 🫏🔊", "min": 10, "max": 25},
-    {"words": ["توورت", "توورت!", "toort"], "text": "تووووووورت! (صدای باد معده) 💨😷", "min": 20, "max": 45},
-    {"words": ["ترک", "ترررک", "تارک", "tarak"], "text": "ترررررررک! (انفجار صوتی) 💥🤯", "min": 30, "max": 70},
-]
-
-async def check_chat_sound_trigger(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = (update.message.text or "").strip().lower()
-    ensure_user(user.id, user.first_name)
-    
-    u_data = get_user(user.id)
-    if u_data and u_data["is_banned"] == 1: return False
-
-    for sound in DONKEY_SOUNDS_DB:
-        if any(w in text.split() or text == w for w in sound["words"]):
-            donkey = get_donkey(user.id)
-            multiplier = donkey["sounds"] * 1.2 if donkey else 1.0
-            score = int(random.randint(sound["min"], sound["max"]) * multiplier)
-            add_coins(user.id, score)
-            add_xp(user.id, 2)
-            
-            await update.message.reply_text(
-                f"🫏 **خرِ {user.first_name} تو گروه صدا داد!**\n"
-                f"🔊 {sound['text']}\n"
-                f"🎁 جایزه: **+{score} 🪙**"
-            )
-            return True
-    return False
-
-async def donkey_sound_system_menu(user_id):
-    donkey = get_donkey(user_id)
-    if not donkey: return "❌ اول باید خرت رو ثبت کنی."
-    cost = 20
-    if not remove_coins(user_id, cost): return f"❌ برای ایجاد صدا {cost} سکه لازم داری!"
-    
-    score = random.randint(10, 40)
-    add_coins(user_id, score)
-    add_xp(user_id, 3)
-    return f"🎙️ **خر تو منو صدا درآورد!**\n━━━━━━━━━━━━━━\n🎁 **جایزه: {score} 🪙**\n💸 هزینه: {cost} 🪙"
-
-# ============================================================
-# UI KEYBOARDS & TEXTS
-# ============================================================
+============================================================
+UI COMPONENTS
+============================================================
 
 def main_menu():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🫏 خر من", callback_data="donkey"), InlineKeyboardButton("🎮 شروع بازی", callback_data="games")],
-        [InlineKeyboardButton("🏪 فروشگاه", callback_data="shop"), InlineKeyboardButton("🎒 کیف", callback_data="inventory")],
-        [InlineKeyboardButton("👤 پروفایل", callback_data="profile"), InlineKeyboardButton("🔊 ایجاد صدا", callback_data="sound_action")],
+        [InlineKeyboardButton("🎮 بازی‌ها", callback_data="games_list")],
+        [InlineKeyboardButton("👤 پروفایل", callback_data="show_profile"), 
+         InlineKeyboardButton("🏪 فروشگاه", callback_data="shop")],
+        [InlineKeyboardButton("🏆 جدول", callback_data="leaderboard")]
     ])
 
-def game_mode_keyboard(game_type):
+def games_menu():
+    buttons = []
+    for key, name in GAME_NAMES.items():
+        buttons.append([InlineKeyboardButton(name, callback_data=f"game_{key}")])
+    buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="home")])
+    return InlineKeyboardMarkup(buttons)
+
+def shop_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤖 بازی با بات هوشمند (PvE)", callback_data="mode_bot")],
-        [InlineKeyboardButton("👥 ایجاد اتاق گروهی (PvP)", callback_data="mode_pvp")],
-        [InlineKeyboardButton("🔙 لغو", callback_data="home")]
+        [InlineKeyboardButton("🎩 کلاه‌ها", callback_data="shop_hats")],
+        [InlineKeyboardButton("🐴 زین‌ها", callback_data="shop_saddles")],
+        [InlineKeyboardButton("👟 نعل‌ها", callback_data="shop_horseshoes")],
+        [InlineKeyboardButton("👔 کروات‌ها", callback_data="shop_ties")],
+        [InlineKeyboardButton("👕 لباس‌ها", callback_data="shop_clothes")],
+        [InlineKeyboardButton("🎀 اکسسوری‌ها", callback_data="shop_accessories")],
+        [InlineKeyboardButton("🔙 بازگشت", callback_data="home")]
     ])
 
-def room_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("👥 ورود به بازی", callback_data="game_join")],
-        [InlineKeyboardButton("▶️ شروع بازی", callback_data="game_start"), InlineKeyboardButton("❌ لغو", callback_data="game_cancel")]
-    ])
+============================================================
+SHOP DATA
+============================================================
 
-def profile_text(user_id):
-    u = get_user(user_id)
-    if not u: return "❌ شناسنامه پیدا نشد."
-    return (f"👤 **شناسنامه طویله‌ای {u['name']}**\n━━━━━━━━━━━━━━\n⭐ سطح: {u['level']}\n✨ تجربه (XP): {u['xp']}\n"
-            f"🪙 جیب شما: **{u['coins']}** سکه\n🏆 برد: {u['wins']} | 💀 باخت: {u['losses']}")
+SHOP_ITEMS = {
+    "hats": {
+        "name": "🎩 کلاه‌ها",
+        "items": {
+            "کلاه نی": {"price": 500, "emoji": "🧑‍🌾"},
+            "کلاه کابوی": {"price": 2000, "emoji": "🤠"},
+            "کلاه نظامی": {"price": 4000, "emoji": "🪖"},
+            "کلاه شیک": {"price": 7000, "emoji": "🎩"},
+            "تاج سلطنتی": {"price": 15000, "emoji": "👑"}
+        }
+    },
+    "saddles": {
+        "name": "🐴 زین‌ها",
+        "items": {
+            "زین چرمی ساده": {"price": 1000, "emoji": "🟫"},
+            "زین نقره‌ای": {"price": 3500, "emoji": "🥈"},
+            "زین طلایی": {"price": 8000, "emoji": "🥇"},
+            "زین الماسی": {"price": 20000, "emoji": "💎"}
+        }
+    },
+    "horseshoes": {
+        "name": "👟 نعل‌ها",
+        "items": {
+            "نعل آهنی": {"price": 500, "emoji": "⚙️"},
+            "نعل برنزی": {"price": 2000, "emoji": "🟠"},
+            "نعل نقره‌ای": {"price": 5000, "emoji": "⚪"},
+            "نعل طلایی": {"price": 12000, "emoji": "✨"}
+        }
+    },
+    "ties": {
+        "name": "👔 کروات‌ها",
+        "items": {
+            "کروات ساده": {"price": 500, "emoji": "⬛"},
+            "کروات راه‌راه": {"price": 1500, "emoji": "🟦"},
+            "کروات پولک‌دار": {"price": 3000, "emoji": "✨"},
+            "کروات ابریشمی": {"price": 6000, "emoji": "🎀"},
+            "کروات سلطنتی": {"price": 10000, "emoji": "👔"}
+        }
+    },
+    "clothes": {
+        "name": "👕 لباس‌ها",
+        "items": {
+            "لباس ساده": {"price": 500, "emoji": "👕"},
+            "لباس شیک": {"price": 2000, "emoji": "🧥"},
+            "لباس مجلسی": {"price": 4000, "emoji": "🤵"},
+            "لباس نظامی": {"price": 7000, "emoji": "🎖️"},
+            "لباس سلطنتی": {"price": 15000, "emoji": "👘"}
+        }
+    },
+    "accessories": {
+        "name": "🎀 اکسسوری‌ها",
+        "items": {
+            "زنگوله گردن": {"price": 500, "emoji": "🔔"},
+            "پاپیون ساده": {"price": 1000, "emoji": "🎀"},
+            "عینک آفتابی": {"price": 2500, "emoji": "😎"},
+            "شال گردن": {"price": 4000, "emoji": "🧣"},
+            "بال فرشته": {"price": 10000, "emoji": "🕊️"}
+        }
+    }
+}
 
-def donkey_text(user_id):
-    d = get_donkey(user_id)
-    u = get_user(user_id)
-    if not d: return "❌ خر یافت نشد."
-    return (f"🫏 **خرِ {u['name']}**\n━━━━━━━━━━━━━━\n🍖 گرسنگی: {d['hunger']}/100\n💧 تشنگی: {d['thirst']}/100\n"
-            f"⚡ انرژی: {d['energy']}/100\n❤️ شادی: {d['happiness']}/100\n\n💪 قدرت: {d['strength']} | 🏃 سرعت: {d['speed']}")
+============================================================
+MESSAGE HANDLER
+============================================================
 
-# ============================================================
-# CALLBACK HANDLERS
-# ============================================================
+async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    text = update.message.text.strip()
+    ensure_user(user.id, user.first_name)
+    
+    u_data = get_user(user.id)
+    if u_data and u_data["is_banned"] == 1:
+        return await update.message.reply_text("🚫 شما بن شده‌اید!")
+    
+    # ===== ADMIN COMMANDS =====
+    if user.id == OWNER_ID and update.message.reply_to_message:
+        parts = text.split()
+        if not parts:
+            return
+        cmd = parts[0].lower()
+        target = update.message.reply_to_message.from_user
+        
+        if cmd in ["/ban", "بن"]:
+            with closing(db_connect()) as db:
+                db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (target.id,))
+                db.commit()
+            await update.message.reply_text(f"✅ {target.first_name} بن شد!")
+            return
+        if cmd in ["/unban", "انبن"]:
+            with closing(db_connect()) as db:
+                db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (target.id,))
+                db.commit()
+            await update.message.reply_text(f"✅ {target.first_name} آنبن شد!")
+            return
+        if cmd in ["/addcoin", "سکه", "+سکه"] and len(parts) > 1:
+            try:
+                amt = int(parts[1])
+                add_coins(target.id, amt)
+                await update.message.reply_text(f"💰 {amt:,} {CURRENCY_NAME} به {target.first_name} اضافه شد!")
+            except:
+                pass
+            return
+        if cmd in ["/remcoin", "کسر", "-سکه"] and len(parts) > 1:
+            try:
+                amt = int(parts[1])
+                with closing(db_connect()) as db:
+                    db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (amt, target.id))
+                    db.commit()
+                await update.message.reply_text(f"🔥 {amt:,} {CURRENCY_NAME} از {target.first_name} کسر شد!")
+            except:
+                pass
+            return
+    
+    # ===== START =====
+    if text.startswith("/start"):
+        return await update.message.reply_text(
+            "🫏 **به طویله خرستان خوش آمدید!**\n\n"
+            "با ربات ما می‌توانید:\n"
+            "• 🎮 ۷ بازی مختلف انجام دهید\n"
+            "• 🏆 با دوستان مسابقه دهید\n"
+            "• 🎁 جایزه روزانه بگیرید\n"
+            "• 🔊 صدای خر بدهید و جایزه بگیرید\n"
+            "• ❤️ جفت‌گیری کنید و کره‌خر داشته باشید\n"
+            "• 🎀 خر خود را با وسایل مختلف تزئین کنید\n\n"
+            "از منو استفاده کنید:",
+            reply_markup=main_menu(),
+            parse_mode="Markdown"
+        )
+    
+    # ===== DAILY REWARD =====
+    if text in ["روزانه", "daily", "جایزه روزانه"]:
+        await daily_reward(update, context)
+        return
+    
+    # ===== MATE =====
+    if text == "جفت‌گیری":
+        await mate_command(update, context)
+        return
+    
+    # ===== PROFILE =====
+    if text in ["پروفایل", "profile", "پروف"]:
+        if update.message.reply_to_message:
+            target = update.message.reply_to_message.from_user
+            target_id = target.id
+        else:
+            target_id = user.id
+        return await update.message.reply_text(
+            profile_text(target_id),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
+            parse_mode="Markdown"
+        )
+    
+    # ===== COINS =====
+    if text in ["سکه", "coins", "تی‌تاپ"]:
+        u = get_user(user.id)
+        return await update.message.reply_text(
+            f"💰 **موجودی شما:** {u['coins']:,} {CURRENCY_NAME} {CURRENCY_EMOJI}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
+            parse_mode="Markdown"
+        )
+    
+    # ===== LEADERBOARD =====
+    if text in ["جدول", "ج", "leaderboard", "top"]:
+        with closing(db_connect()) as db:
+            rows = db.execute(
+                "SELECT user_id, name, coins, level FROM users ORDER BY coins DESC LIMIT 10"
+            ).fetchall()
+        
+        if not rows:
+            return await update.message.reply_text("❌ هنوز کسی ثبت نشده!")
+        
+        msg = "🏆 **جدول ثروتمندان طویله**\n━━━━━━━━━━━━━━━━\n"
+        for i, row in enumerate(rows, 1):
+            medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
+            title = get_title_by_level(row["level"])
+            msg += f"{medal} {title} {row['name']} — {row['coins']:,} {CURRENCY_NAME} (سطح {row['level']})\n"
+        
+        user_row = db.execute(
+            "SELECT COUNT(*) + 1 as rank FROM users WHERE coins > (SELECT coins FROM users WHERE user_id = ?)",
+            (user.id,)
+        ).fetchone()
+        
+        if user_row and user_row["rank"]:
+            msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
+        
+        return await update.message.reply_text(msg, parse_mode="Markdown")
+    
+    # ===== DONKEY SOUND =====
+    if text in ["عر", "عرعر", "عرر", "ترک", "تورک"]:
+        await donkey_sound(update, context)
+        return
+
+============================================================
+CALLBACK HANDLER
+============================================================
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -556,380 +740,183 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     u_data = get_user(user.id)
     if u_data and u_data["is_banned"] == 1:
-        return await query.edit_message_text("🚫 **عرعــــر!** شما بن شده‌اید!")
-        
+        return await query.edit_message_text("🚫 شما بن شده‌اید!")
+    
     data = query.data
-
+    
+    # ===== HOME =====
     if data == "home":
-        USER_GAME_SELECTION.pop(user.id, None)
-        return await query.edit_message_text("🏠 منوی اصلی طویله:", reply_markup=main_menu())
-        
-    if data == "profile": return await query.edit_message_text(profile_text(user.id), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="home")]]))
-    if data == "donkey": return await query.edit_message_text(donkey_text(user.id), reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙", callback_data="home")]]))
-    if data == "sound_action": return await query.edit_message_text(await donkey_sound_system_menu(user.id), reply_markup=main_menu(), parse_mode="Markdown")
-
-    if data.startswith("crashout_"):
-        target_user = int(data.split("_")[1])
-        if user.id != target_user: return await query.answer("⛔ دکمه ماله یکی دیگه‌ست.", show_alert=True)
-        session = CRASH_SESSIONS.get(user.id)
-        if not session or not session.get("active"): return await query.answer("❌ تمام شده!", show_alert=True)
-        
-        session["active"] = False 
-        prize = int(session["bet"] * session["current"])
-        add_coins(user.id, prize)
-        record_win(user.id)
-        return await query.edit_message_text(f"✅ **پرواز موفق! ضریب {session['current']:.2f}x**\n🪙 جایزه: **{prize}** سکه", reply_markup=main_menu())
-
-    # دوز
-    if data.startswith("t3_"):
-        if data == "t3_ignore": return
-        room = get_room(update.effective_chat.id)
-        if not room or room.game_type != "دوز" or not room.started: return await query.answer("بازی در جریان نیست.", show_alert=True)
-        if user.id != room.game_state["turn"]: return await query.answer("نوبت شما نیست!", show_alert=True)
-            
-        idx = int(data.split("_")[1])
-        symbol = "❌" if user.id == room.players[0] else "⭕️"
-        room.game_state["board"][idx] = symbol
-        
-        winner = check_tictactoe_winner(room.game_state["board"])
-        if winner:
-            prize = int((room.bet * len(room.players)) * 0.95)
-            if winner == "DRAW":
-                for p in room.players:
-                    if p != -1: add_coins(p, room.bet)
-                msg = "🤝 **بازی دوز مساوی شد! سکه‌ها برگشت.**"
-            else:
-                win_player = room.players[0] if winner == "❌" else room.players[1]
-                lose_player = room.players[1] if winner == "❌" else room.players[0]
-                if win_player != -1: add_coins(win_player, prize); record_win(win_player)
-                if lose_player != -1: record_loss(lose_player)
-                msg = f"🏆 **{get_p_name(win_player)} برنده شد!**\n🪙 جایزه: {prize} سکه"
-            
-            b = room.game_state["board"]
-            msg += f"\n\n`{b[0]}|{b[1]}|{b[2]}\n{b[3]}|{b[4]}|{b[5]}\n{b[6]}|{b[7]}|{b[8]}`"
-            remove_room(room)
-            return await query.edit_message_text(msg, reply_markup=main_menu(), parse_mode="Markdown")
-        else:
-            next_turn = room.players[1] if user.id == room.players[0] else room.players[0]
-            room.game_state["turn"] = next_turn
-            room.game_state["turn_num"] += 1
-            
-            msg, kb = build_tictactoe_ui(room)
-            await query.edit_message_text(msg, reply_markup=kb)
-            
-            if next_turn == -1:
-                await handle_tictactoe_bot(context.bot, room, room.chat_id)
-            else:
-                asyncio.create_task(tictactoe_timer_task(context.bot, room.chat_id, room.game_state["turn_num"], next_turn))
+        return await query.edit_message_text(
+            "🏠 **منوی اصلی طویله**",
+            reply_markup=main_menu(),
+            parse_mode="Markdown"
+        )
+    
+    # ===== GAMES LIST =====
+    if data == "games_list":
+        return await query.edit_message_text(
+            "🎮 **انتخاب بازی:**",
+            reply_markup=games_menu(),
+            parse_mode="Markdown"
+        )
+    
+    # ===== GAME SELECTION =====
+    if data.startswith("game_"):
+        game_type = data[5:]
+        if game_type not in GAME_NAMES:
             return
-
-    # سنگ، کاغذ، قیچی
-    if data.startswith("rps_"):
-        room = get_room(update.effective_chat.id)
-        if not room or room.game_type != "سنگ_کاغذ_قیچی" or not room.started: return await query.answer("بازی در جریان نیست.", show_alert=True)
-        if user.id not in room.players: return await query.answer("شما بازیکن نیستید!", show_alert=True)
         
-        room.game_state["choices"][user.id] = data.split("_")[1]
-        p1, p2 = room.players[0], room.players[1]
-        choices = room.game_state["choices"]
+        if user.id in PLAYER_IN_GAME:
+            return await query.answer("⚠️ شما در یک بازی دیگر هستید!", show_alert=True)
         
-        if room.against_bot and -1 in room.players:
-            choices[-1] = random.choice(["سنگ", "کاغذ", "قیچی"])
-            
-        if choices.get(p1) and choices.get(p2):
-            m1, m2 = choices[p1], choices[p2]
-            if m1 == m2: winner = "DRAW"
-            else:
-                win_map = {"سنگ": "قیچی", "کاغذ": "سنگ", "قیچی": "کاغذ"}
-                winner = p1 if win_map[m1] == m2 else p2
-                
-            prize = int((room.bet * 2) * 0.95)
-            if winner == "DRAW":
-                for p in room.players:
-                    if p != -1: add_coins(p, room.bet)
-                msg = f"🤝 **مساوی!** سکه‌ها برگشت."
-            else:
-                loser = p2 if winner == p1 else p1
-                if winner != -1: add_coins(winner, prize); record_win(winner)
-                if loser != -1: record_loss(loser)
-                msg = f"🏆 **{get_p_name(winner)} برنده شد!**\n🪙 جایزه: {prize} سکه"
-                
-            remove_room(room)
-            return await query.edit_message_text(msg, reply_markup=main_menu())
-        else:
-            msg, kb = build_rps_ui(room)
-            return await query.edit_message_text(msg, reply_markup=kb)
-
-    # کارت ۳۱
-    if data in ["c31_draw", "c31_pass"]:
-        room = get_room(update.effective_chat.id)
-        if not room or room.game_type != "کارت_31" or not room.started: return await query.answer("بازی در جریان نیست.", show_alert=True)
-        if user.id != room.game_state["turn"]: return await query.answer("نوبت شما نیست!", show_alert=True)
+        context.user_data["temp_game"] = game_type
+        context.user_data["awaiting_bet"] = True
         
-        if data == "c31_draw":
-            card_val = random.randint(2, 10)
-            room.game_state["scores"][user.id] += card_val
-            if room.game_state["scores"][user.id] > 31:
-                room.game_state["lives"][user.id] -= 1
-                room.game_state["scores"][user.id] = 0
-                await query.answer("💥 سوختی! امتیازت بالای ۳۱ شد و یک جون کم شد!", show_alert=True)
-                if room.game_state["lives"][user.id] <= 0:
-                    msg = f"💀 **{get_p_name(user.id)} باخت و جون‌هاش تموم شد!**"
-                    other = room.players[1] if room.players[0] == user.id else room.players[0]
-                    prize = int((room.bet * 2) * 0.95)
-                    if other != -1: add_coins(other, prize); record_win(other)
-                    remove_room(room)
-                    return await query.edit_message_text(msg, reply_markup=main_menu())
-            else:
-                await query.answer(f"🃏 کارت {card_val} کشیدی. کل: {room.game_state['scores'][user.id]}", show_alert=True)
-                
-        elif data == "c31_pass" or room.game_state["scores"][user.id] >= 28:
-            other = room.players[1] if room.players[0] == user.id else room.players[0]
-            s1 = room.game_state["scores"][room.players[0]]
-            s2 = room.game_state["scores"][room.players[1]]
-            
-            prize = int((room.bet * 2) * 0.95)
-            if s1 > s2: winner, loser = room.players[0], room.players[1]
-            elif s2 > s1: winner, loser = room.players[1], room.players[0]
-            else: winner = "DRAW"
-            
-            if winner == "DRAW":
-                for p in room.players:
-                    if p != -1: add_coins(p, room.bet)
-                msg = f"🤝 **مساوی شدید!** امتیاز هر دو: {s1}"
-            else:
-                if winner != -1: add_coins(winner, prize); record_win(winner)
-                if loser != -1: record_loss(loser)
-                msg = f"🏆 **{get_p_name(winner)} در بازی ۳۱ پیروز شد!**\n{get_p_name(room.players[0])}: {s1} | {get_p_name(room.players[1])}: {s2}\n🪙 جایزه: {prize} سکه"
-            remove_room(room)
-            return await query.edit_message_text(msg, reply_markup=main_menu())
-
-        next_turn = room.players[1] if user.id == room.players[0] else room.players[0]
-        room.game_state["turn"] = next_turn
-        room.game_state["turn_num"] += 1
+        await query.edit_message_text(
+            f"🎮 **{GAME_NAMES[game_type]}**\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 حداقل شرط: {MIN_BET} {CURRENCY_NAME}\n"
+            f"👥 حداکثر بازیکن: {GAME_MAX_PLAYERS[game_type]}\n\n"
+            f"مبلغ شرط را وارد کنید (عدد):",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 لغو", callback_data="games_list")]]),
+            parse_mode="Markdown"
+        )
+        context.user_data["awaiting_bet"] = True
+        return
+    
+    # ===== PROFILE =====
+    if data == "show_profile":
+        return await query.edit_message_text(
+            profile_text(user.id),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
+            parse_mode="Markdown"
+        )
+    
+    # ===== LEADERBOARD =====
+    if data == "leaderboard":
+        with closing(db_connect()) as db:
+            rows = db.execute(
+                "SELECT user_id, name, coins, level FROM users ORDER BY coins DESC LIMIT 10"
+            ).fetchall()
         
-        msg, kb = build_card31_ui(room)
-        await query.edit_message_text(msg, reply_markup=kb)
+        if not rows:
+            return await query.edit_message_text("❌ هنوز کسی ثبت نشده!")
         
-        if next_turn == -1:
-            await handle_card31_bot(context.bot, room, room.chat_id)
-        else:
-            asyncio.create_task(card31_timer_task(context.bot, room.chat_id, room.game_state["turn_num"], next_turn))
+        msg = "🏆 **جدول ثروتمندان طویله**\n━━━━━━━━━━━━━━━━\n"
+        for i, row in enumerate(rows, 1):
+            medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
+            title = get_title_by_level(row["level"])
+            msg += f"{medal} {title} {row['name']} — {row['coins']:,} {CURRENCY_NAME} (سطح {row['level']})\n"
+        
+        user_row = db.execute(
+            "SELECT COUNT(*) + 1 as rank FROM users WHERE coins > (SELECT coins FROM users WHERE user_id = ?)",
+            (user.id,)
+        ).fetchone()
+        
+        if user_row and user_row["rank"]:
+            msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
+        
+        return await query.edit_message_text(
+            msg,
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت", callback_data="home")]]),
+            parse_mode="Markdown"
+        )
+    
+    # ===== SHOP =====
+    if data == "shop":
+        return await query.edit_message_text(
+            "🏪 **فروشگاه طویله**\nانتخاب کنید:",
+            reply_markup=shop_keyboard(),
+            parse_mode="Markdown"
+        )
+    
+    # ===== SHOP CATEGORIES =====
+    if data.startswith("shop_"):
+        category = data[5:]
+        if category not in SHOP_ITEMS:
+            return
+        
+        cat_data = SHOP_ITEMS[category]
+        buttons = []
+        for item_name, item_data in cat_data["items"].items():
+            buttons.append([InlineKeyboardButton(
+                f"{item_data['emoji']} {item_name} - {item_data['price']:,} {CURRENCY_NAME}",
+                callback_data=f"buy_{category}_{item_name}"
+            )])
+        buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="shop")])
+        
+        return await query.edit_message_text(
+            f"🏪 **{cat_data['name']}**\nانتخاب کنید:",
+            reply_markup=InlineKeyboardMarkup(buttons),
+            parse_mode="Markdown"
+        )
+    
+    # ===== BUY ITEM =====
+    if data.startswith("buy_"):
+        parts = data.split("_")
+        if len(parts) < 3:
+            return
+        category = parts[1]
+        item_name = "_".join(parts[2:])
+        
+        if category not in SHOP_ITEMS:
+            return
+        if item_name not in SHOP_ITEMS[category]["items"]:
+            return
+        
+        item_data = SHOP_ITEMS[category]["items"][item_name]
+        price = item_data["price"]
+        
+        if not remove_coins(user.id, price):
+            return await query.answer(f"❌ {price:,} {CURRENCY_NAME} ندارید!", show_alert=True)
+        
+        # ذخیره در دیتابیس دونکی
+        donkey = get_donkey(user.id)
+        if not donkey:
+            return await query.answer("❌ خر شما وجود ندارد!", show_alert=True)
+        
+        col_map = {
+            "hats": "equipped_hat",
+            "saddles": "equipped_saddle",
+            "horseshoes": "equipped_horseshoe",
+            "ties": "equipped_tie",
+            "clothes": "equipped_clothes",
+            "accessories": "equipped_accessory"
+        }
+        
+        col = col_map.get(category)
+        if col:
+            with closing(db_connect()) as db:
+                db.execute(f"UPDATE donkeys SET {col} = ? WHERE user_id = ?", (item_name, user.id))
+                db.commit()
+        
+        await query.answer(f"✅ {item_name} خریداری و فعال شد!", show_alert=True)
+        
+        # بازگشت به فروشگاه
+        await query.edit_message_text(
+            f"✅ **خرید موفق!**\n{item_data['emoji']} {item_name} روی خر شما قرار گرفت.\n💰 هزینه: {price:,} {CURRENCY_NAME}",
+            reply_markup=shop_keyboard(),
+            parse_mode="Markdown"
+        )
         return
 
-    # لگد خر
-    if data == "dk_kick":
-        room = get_room(update.effective_chat.id)
-        if not room or room.game_type != "لگد_خر" or not room.started: return await query.answer("بازی در جریان نیست.", show_alert=True)
-        if user.id != room.game_state["turn"]: return await query.answer("نوبت شما نیست!", show_alert=True)
-        
-        hit = random.random() < 0.40
-        if hit:
-            prize = int((room.bet * len(room.players)) * 0.95)
-            other = room.players[1] if room.players[0] == user.id else room.players[0]
-            if other != -1: add_coins(other, prize); record_win(other)
-            record_loss(user.id)
-            msg = f"🐴💥 **تقققق! خر جفتک انداخت تو صورت {get_p_name(user.id)}!**\n\n🏆 **{get_p_name(other)} برنده شد!**\n🪙 جایزه: {prize} سکه"
-            remove_room(room)
-            return await query.edit_message_text(msg, reply_markup=main_menu())
-        else:
-            await query.answer("😅 جان سالم به در بردی! خر لگد نزد.", show_alert=True)
-            next_turn = room.players[1] if user.id == room.players[0] else room.players[0]
-            room.game_state["turn"] = next_turn
-            room.game_state["turn_num"] += 1
-            
-            msg, kb = build_donkey_ui(room)
-            await query.edit_message_text(msg, reply_markup=kb)
-            
-            if next_turn == -1:
-                await handle_donkey_bot(context.bot, room, room.chat_id)
-            else:
-                asyncio.create_task(donkey_timer_task(context.bot, room.chat_id, room.game_state["turn_num"], next_turn))
-            return
+============================================================
+MAIN
+============================================================
 
-    if data == "games":
-        rows = [[InlineKeyboardButton(GAME_NAMES[g], callback_data=f"game_{g}")] for g in GAME_NAMES.keys()]
-        rows.append([InlineKeyboardButton("🔙 بازگشت", callback_data="home")])
-        return await query.edit_message_text("🎮 قمارخونه طویله (بازی‌های تعاملی نوبتی):", reply_markup=InlineKeyboardMarkup(rows))
-
-    if data.startswith("game_") and data not in ["game_join", "game_start", "game_cancel"]:
-        g_type = data[5:]
-        USER_GAME_SELECTION[user.id] = {"game": g_type, "step": "waiting_for_bet"}
-        return await query.edit_message_text(f"بازی: {GAME_NAMES[g_type]}\n💰 مبلغ شرط را بفرست (حداقل {MIN_BET}):")
-
-    if data == "mode_bot":
-        state = USER_GAME_SELECTION.get(user.id)
-        if not state: return
-        if not remove_coins(user.id, state["bet"]): return await query.edit_message_text("❌ پول نداری!", reply_markup=main_menu())
-
-        room = GameRoom(game_type=state["game"], chat_id=update.effective_chat.id, creator_id=user.id, bet=state["bet"], against_bot=True, players=[user.id, -1], started=True)
-        ACTIVE_GAMES[str(update.effective_chat.id)] = room
-        
-        if state["game"] == "دوز":
-            room.game_state = {"board": [" "]*9, "turn": user.id, "strikes": {user.id: 0, -1: 0}, "turn_num": 0}
-            msg, kb = build_tictactoe_ui(room)
-            m = await query.edit_message_text(msg, reply_markup=kb)
-            room.message_id = m.message_id
-            asyncio.create_task(tictactoe_timer_task(context.bot, room.chat_id, 0, user.id))
-            return
-        elif state["game"] == "سنگ_کاغذ_قیچی":
-            room.game_state = {"choices": {}, "round": 1}
-            msg, kb = build_rps_ui(room)
-            m = await query.edit_message_text(msg, reply_markup=kb)
-            room.message_id = m.message_id
-            asyncio.create_task(rps_timer_task(context.bot, room.chat_id, 1))
-            return
-        elif state["game"] == "کارت_31":
-            room.game_state = {"scores": {user.id: 0, -1: 0}, "lives": {user.id: 3, -1: 3}, "turn": user.id, "turn_num": 0}
-            msg, kb = build_card31_ui(room)
-            m = await query.edit_message_text(msg, reply_markup=kb)
-            room.message_id = m.message_id
-            asyncio.create_task(card31_timer_task(context.bot, room.chat_id, 0, user.id))
-            return
-        elif state["game"] == "لگد_خر":
-            room.game_state = {"strikes": {user.id: 0, -1: 0}, "turn": user.id, "turn_num": 0}
-            msg, kb = build_donkey_ui(room)
-            m = await query.edit_message_text(msg, reply_markup=kb)
-            room.message_id = m.message_id
-            asyncio.create_task(donkey_timer_task(context.bot, room.chat_id, 0, user.id))
-            return
-
-    if data == "mode_pvp":
-        state = USER_GAME_SELECTION.get(user.id)
-        if not state: return
-        if get_room(update.effective_chat.id): return await query.edit_message_text("❌ بازی دیگری جریان دارد.", reply_markup=main_menu())
-        if not remove_coins(user.id, state["bet"]): return await query.edit_message_text("❌ پول نداری!", reply_markup=main_menu())
-
-        room = GameRoom(game_type=state["game"], chat_id=update.effective_chat.id, creator_id=user.id, bet=state["bet"], max_players=2, players=[user.id])
-        ACTIVE_GAMES[str(update.effective_chat.id)] = room
-        PLAYER_GAMES[user.id] = str(update.effective_chat.id)
-        txt = f"🎮 اتاق: {GAME_NAMES[state['game']]}\n💰 شرط: {state['bet']}\n\n1. {user.first_name}"
-        return await query.edit_message_text(txt, reply_markup=room_keyboard())
-
-    if data == "game_join":
-        room = get_room(update.effective_chat.id)
-        if not room or room.started: return await query.answer("❌ غیرقابل دسترس.", show_alert=True)
-        if user.id in room.players: return await query.answer("قبلا وارد شدی.", show_alert=True)
-        if not remove_coins(user.id, room.bet): return await query.answer("پول کم داری!", show_alert=True)
-        
-        room.players.append(user.id)
-        names = "\n".join([f"{i+1}. {get_user(p)['name']}" for i, p in enumerate(room.players)])
-        txt = f"🎮 اتاق: {GAME_NAMES[room.game_type]}\n💰 شرط: {room.bet}\n\n{names}"
-        return await query.edit_message_text(txt, reply_markup=room_keyboard())
-
-    if data == "game_start":
-        room = get_room(update.effective_chat.id)
-        if not room or room.creator_id != user.id: return await query.answer("فقط سازنده!", show_alert=True)
-        if len(room.players) < 2: return await query.answer("حداقل ۲ نفر!", show_alert=True)
-        
-        room.started = True
-        if room.game_type == "دوز":
-            room.game_state = {"board": [" "]*9, "turn": room.players[0], "strikes": {p: 0 for p in room.players}, "turn_num": 0}
-            msg, kb = build_tictactoe_ui(room)
-            m = await query.edit_message_text(msg, reply_markup=kb)
-            room.message_id = m.message_id
-            asyncio.create_task(tictactoe_timer_task(context.bot, room.chat_id, 0, room.players[0]))
-            return
-        elif room.game_type == "سنگ_کاغذ_قیچی":
-            room.game_state = {"choices": {}, "round": 1}
-            msg, kb = build_rps_ui(room)
-            m = await query.edit_message_text(msg, reply_markup=kb)
-            room.message_id = m.message_id
-            asyncio.create_task(rps_timer_task(context.bot, room.chat_id, 1))
-            return
-        elif room.game_type == "کارت_31":
-            room.game_state = {"scores": {p: 0 for p in room.players}, "lives": {p: 3 for p in room.players}, "turn": room.players[0], "turn_num": 0}
-            msg, kb = build_card31_ui(room)
-            m = await query.edit_message_text(msg, reply_markup=kb)
-            room.message_id = m.message_id
-            asyncio.create_task(card31_timer_task(context.bot, room.chat_id, 0, room.players[0]))
-            return
-        elif room.game_type == "لگد_خر":
-            room.game_state = {"strikes": {p: 0 for p in room.players}, "turn": room.players[0], "turn_num": 0}
-            msg, kb = build_donkey_ui(room)
-            m = await query.edit_message_text(msg, reply_markup=kb)
-            room.message_id = m.message_id
-            asyncio.create_task(donkey_timer_task(context.bot, room.chat_id, 0, room.players[0]))
-            return
-
-    if data == "game_cancel":
-        room = get_room(update.effective_chat.id)
-        if not room or room.creator_id != user.id: return await query.answer("فقط سازنده!", show_alert=True)
-        for p in room.players: add_coins(p, room.bet)
-        remove_room(room)
-        return await query.edit_message_text("❌ لغو شد و سکه‌ها برگشت.", reply_markup=main_menu())
-
-# ============================================================
-# TEXT HANDLERS (GROUP CHAT SOUND DETECTION + ADMIN)
-# ============================================================
-async def general_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-    text = (update.message.text or "").strip()
-    ensure_user(user.id, user.first_name)
-
-    u_data = get_user(user.id)
-    if u_data and u_data["is_banned"] == 1: return
-
-    # ۱. بررسی کلمات صدا در گروه یا پی‌وی (عر، توورت، ترک)
-    triggered = await check_chat_sound_trigger(update, context)
-    if triggered: return # اگر کلمه صدا بود، دیگه بقیه دستورات چک نشن
-
-    # ۲. پنل ادمین با ریپلی
-    if user.id == OWNER_ID and text.startswith(("/", "بن", "انبن", "سکه", "کسر", "+سکه", "-سکه")):
-        if update.message.reply_to_message:
-            target_id = update.message.reply_to_message.from_user.id
-            parts = text.split()
-            cmd = parts[0].lower()
-            if cmd in ["/ban", "بن"]:
-                with closing(db_connect()) as db: db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (target_id,)); db.commit()
-                await update.message.reply_text("✅ کاربر بن شد.")
-                return
-            elif cmd in ["/addcoin", "سکه", "+سکه"] and len(parts) > 1:
-                try:
-                    amt = int(parts[1])
-                    add_coins(target_id, amt)
-                    await update.message.reply_text(f"💰 {amt} سکه واریز شد (ارباب سخاوتمند).")
-                except: pass
-                return
-
-    if text == "/start":
-        USER_GAME_SELECTION.pop(user.id, None)
-        return await update.message.reply_text("🫏 **خوش اومدی!** تو گروه‌ها کلماتی مثل `عر`، `توورت` یا `ترک` رو بفرست تا خرت صدا در بیاره و جایزه بگیری!\n\n👇 از منو انتخاب کن:", reply_markup=main_menu())
-
-    state = USER_GAME_SELECTION.get(user.id)
-    if state and state.get("step") == "waiting_for_bet":
-        if text.isdigit():
-            bet = int(text)
-            if bet < MIN_BET: return await update.message.reply_text(f"حداقل شرط {MIN_BET} سکه!")
-            if u_data['coins'] < bet: return await update.message.reply_text("❌ پول نداری! جیبت خالیه.")
-            
-            if state["game"] == "انفجار":
-                remove_coins(user.id, bet)
-                r = random.random()
-                c_point = max(1.00, 0.95 / r)
-                if c_point > 20.0: c_point = 20.0
-                
-                CRASH_SESSIONS[user.id] = {"active": True, "bet": bet, "current": 1.00, "crash_point": c_point}
-                msg = f"💥 **بازی زنده انفجار**\n💰 شرط: {bet} 🪙\n\n📈 ضریب: **1.00x**"
-                btn = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 برداشت", callback_data=f"crashout_{user.id}")]])
-                sent_msg = await update.message.reply_text(msg, reply_markup=btn)
-                asyncio.create_task(run_crash_task(context.bot, update.effective_chat.id, sent_msg.message_id, user.id, CRASH_SESSIONS[user.id]))
-                USER_GAME_SELECTION.pop(user.id, None)
-                return
-
-            USER_GAME_SELECTION[user.id]["bet"] = bet
-            USER_GAME_SELECTION[user.id]["step"] = "ready_for_mode"
-            return await update.message.reply_text(f"بازی: {GAME_NAMES[state['game']]}\nشرط: {bet} 🪙\n\nحالت رو انتخاب کن:", reply_markup=game_mode_keyboard(state["game"]))
-
-# ============================================================
-# MAIN
-# ============================================================
 def main():
-    if not BOT_TOKEN: return
+    if not BOT_TOKEN:
+        logger.error("❌ BOT_TOKEN تنظیم نشده!")
+        return
+    
     init_db()
+    logger.info("✅ دیتابیس راه‌اندازی شد")
+    
     app = Application.builder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT | filters.COMMAND, general_text_handler))
+    app.add_handler(MessageHandler(filters.TEXT, message_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
+    
+    logger.info("✅ ربات خرستان راه‌اندازی شد!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
