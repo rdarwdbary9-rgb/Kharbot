@@ -19,7 +19,10 @@ from telegram.ext import Application, CallbackQueryHandler, MessageHandler, Cont
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
-DB_FILE = "kharbot.db"
+
+# مسیر دیتابیس در /tmp
+DB_FILE = "/tmp/kharbot.db"
+
 MIN_BET = 10
 START_COINS = 2500
 MAX_PLAYERS = 10
@@ -34,37 +37,46 @@ logger = logging.getLogger("KHARBOT")
 # ============================================================
 
 def db_connect():
-    db = sqlite3.connect(DB_FILE, timeout=20)
-    db.row_factory = sqlite3.Row
-    return db
+    try:
+        db = sqlite3.connect(DB_FILE, timeout=20)
+        db.row_factory = sqlite3.Row
+        return db
+    except sqlite3.OperationalError as e:
+        logger.error(f"❌ خطای دیتابیس: {e}")
+        raise
 
 def init_db():
-    with closing(db_connect()) as db:
-        db.execute("""CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            coins INTEGER NOT NULL DEFAULT 2500,
-            level INTEGER NOT NULL DEFAULT 1,
-            wins INTEGER NOT NULL DEFAULT 0,
-            losses INTEGER NOT NULL DEFAULT 0,
-            is_banned INTEGER DEFAULT 0,
-            created_at INTEGER NOT NULL,
-            last_mate INTEGER DEFAULT 0,
-            babies INTEGER DEFAULT 0,
-            baby_names TEXT DEFAULT '[]',
-            last_sound INTEGER DEFAULT 0,
-            last_daily INTEGER DEFAULT 0)""")
-        
-        db.execute("""CREATE TABLE IF NOT EXISTS donkeys (
-            user_id INTEGER PRIMARY KEY,
-            equipped_hat TEXT DEFAULT '',
-            equipped_saddle TEXT DEFAULT '',
-            equipped_horseshoe TEXT DEFAULT '',
-            equipped_tie TEXT DEFAULT '',
-            equipped_clothes TEXT DEFAULT '',
-            equipped_accessory TEXT DEFAULT '',
-            FOREIGN KEY(user_id) REFERENCES users(user_id))""")
-        db.commit()
+    try:
+        with closing(db_connect()) as db:
+            db.execute("""CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                coins INTEGER NOT NULL DEFAULT 2500,
+                level INTEGER NOT NULL DEFAULT 1,
+                wins INTEGER NOT NULL DEFAULT 0,
+                losses INTEGER NOT NULL DEFAULT 0,
+                is_banned INTEGER DEFAULT 0,
+                created_at INTEGER NOT NULL,
+                last_mate INTEGER DEFAULT 0,
+                babies INTEGER DEFAULT 0,
+                baby_names TEXT DEFAULT '[]',
+                last_sound INTEGER DEFAULT 0,
+                last_daily INTEGER DEFAULT 0)""")
+            
+            db.execute("""CREATE TABLE IF NOT EXISTS donkeys (
+                user_id INTEGER PRIMARY KEY,
+                equipped_hat TEXT DEFAULT '',
+                equipped_saddle TEXT DEFAULT '',
+                equipped_horseshoe TEXT DEFAULT '',
+                equipped_tie TEXT DEFAULT '',
+                equipped_clothes TEXT DEFAULT '',
+                equipped_accessory TEXT DEFAULT '',
+                FOREIGN KEY(user_id) REFERENCES users(user_id))""")
+            db.commit()
+        logger.info("✅ دیتابیس در /tmp/kharbot.db راه‌اندازی شد")
+    except sqlite3.OperationalError as e:
+        logger.error(f"❌ خطا در راه‌اندازی دیتابیس: {e}")
+        raise
 
 # ============================================================
 # مدیریت کاربران
@@ -634,6 +646,7 @@ SHOP_ITEMS = {
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text.strip()
+    
     ensure_user(user.id, user.first_name)
     
     u_data = get_user(user.id)
@@ -641,87 +654,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 شما بن شده‌اید!")
         return
     
-    # ===== دریافت شرط =====
-    if context.user_data.get("awaiting_bet"):
-        if text.isdigit():
-            bet = int(text)
-            if bet < MIN_BET:
-                await update.message.reply_text(f"❌ حداقل شرط {MIN_BET} {CURRENCY_NAME} است!")
-                return
-            
-            u = get_user(user.id)
-            if u["coins"] < bet:
-                await update.message.reply_text(f"❌ پول کافی ندارید! موجودی: {u['coins']:,} {CURRENCY_NAME}")
-                return
-            
-            game_type = context.user_data.get("temp_game")
-            if not game_type:
-                await update.message.reply_text("❌ خطا! دوباره از منو بازی رو انتخاب کن.")
-                return
-            
-            remove_coins(user.id, bet)
-            room = create_room(update.effective_chat.id, game_type, user.id, bet)
-            
-            msg_text = (
-                f"🎮 **{GAME_NAMES[game_type]}**\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"💰 شرط: {bet} {CURRENCY_NAME}\n"
-                f"👥 بازیکنان: 1/{GAME_MAX_PLAYERS[game_type]}\n"
-                f"\n🔄 منتظر ورود بازیکنان دیگر..."
-            )
-            
-            sent_msg = await update.message.reply_text(
-                msg_text,
-                reply_markup=room_control_keyboard(room),
-                parse_mode="Markdown"
-            )
-            room.message_id = sent_msg.message_id
-            
-            context.user_data["awaiting_bet"] = False
-            context.user_data["temp_game"] = None
-            
-        else:
-            await update.message.reply_text("❌ لطفاً یک عدد معتبر وارد کنید!")
-        return
-    
-    # ===== دستورات ادمین =====
-    if user.id == OWNER_ID and update.message.reply_to_message:
-        parts = text.split()
-        if not parts:
-            return
-        cmd = parts[0].lower()
-        target = update.message.reply_to_message.from_user
-        
-        if cmd in ["/ban", "بن"]:
-            with closing(db_connect()) as db:
-                db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (target.id,))
-                db.commit()
-            await update.message.reply_text(f"✅ {target.first_name} بن شد!")
-            return
-        if cmd in ["/unban", "انبن"]:
-            with closing(db_connect()) as db:
-                db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (target.id,))
-                db.commit()
-            await update.message.reply_text(f"✅ {target.first_name} آنبن شد!")
-            return
-        if cmd in ["/addcoin", "سکه", "+سکه"] and len(parts) > 1:
-            try:
-                amt = int(parts[1])
-                add_coins(target.id, amt)
-                await update.message.reply_text(f"💰 {amt:,} {CURRENCY_NAME} به {target.first_name} اضافه شد!")
-            except:
-                pass
-            return
-        if cmd in ["/remcoin", "کسر", "-سکه"] and len(parts) > 1:
-            try:
-                amt = int(parts[1])
-                with closing(db_connect()) as db:
-                    db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (amt, target.id))
-                    db.commit()
-                await update.message.reply_text(f"🔥 {amt:,} {CURRENCY_NAME} از {target.first_name} کسر شد!")
-            except:
-                pass
-            return
+    # ============================================================
+    # دستورات فارسی - اولویت اول
+    # ============================================================
     
     # ===== شروع =====
     if text.startswith("/start"):
@@ -805,6 +740,94 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== صدای خر =====
     if text in ["عر", "عرعر", "عرر", "ترک", "تورک"]:
         await donkey_sound(update, context)
+        return
+    
+    # ============================================================
+    # دستورات ادمین (با ریپلی)
+    # ============================================================
+    
+    if user.id == OWNER_ID and update.message.reply_to_message:
+        parts = text.split()
+        if not parts:
+            return
+        cmd = parts[0].lower()
+        target = update.message.reply_to_message.from_user
+        
+        if cmd in ["/ban", "بن"]:
+            with closing(db_connect()) as db:
+                db.execute("UPDATE users SET is_banned = 1 WHERE user_id = ?", (target.id,))
+                db.commit()
+            await update.message.reply_text(f"✅ {target.first_name} بن شد!")
+            return
+        if cmd in ["/unban", "انبن"]:
+            with closing(db_connect()) as db:
+                db.execute("UPDATE users SET is_banned = 0 WHERE user_id = ?", (target.id,))
+                db.commit()
+            await update.message.reply_text(f"✅ {target.first_name} آنبن شد!")
+            return
+        if cmd in ["/addcoin", "سکه", "+سکه"] and len(parts) > 1:
+            try:
+                amt = int(parts[1])
+                add_coins(target.id, amt)
+                await update.message.reply_text(f"💰 {amt:,} {CURRENCY_NAME} به {target.first_name} اضافه شد!")
+            except:
+                pass
+            return
+        if cmd in ["/remcoin", "کسر", "-سکه"] and len(parts) > 1:
+            try:
+                amt = int(parts[1])
+                with closing(db_connect()) as db:
+                    db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (amt, target.id))
+                    db.commit()
+                await update.message.reply_text(f"🔥 {amt:,} {CURRENCY_NAME} از {target.first_name} کسر شد!")
+            except:
+                pass
+            return
+    
+    # ============================================================
+    # دریافت شرط
+    # ============================================================
+    
+    if context.user_data.get("awaiting_bet"):
+        if text.isdigit():
+            bet = int(text)
+            if bet < MIN_BET:
+                await update.message.reply_text(f"❌ حداقل شرط {MIN_BET} {CURRENCY_NAME} است!")
+                return
+            
+            u = get_user(user.id)
+            if u["coins"] < bet:
+                await update.message.reply_text(f"❌ پول کافی ندارید! موجودی: {u['coins']:,} {CURRENCY_NAME}")
+                return
+            
+            game_type = context.user_data.get("temp_game")
+            if not game_type:
+                await update.message.reply_text("❌ خطا! دوباره از منو بازی رو انتخاب کن.")
+                return
+            
+            remove_coins(user.id, bet)
+            room = create_room(update.effective_chat.id, game_type, user.id, bet)
+            
+            msg_text = (
+                f"🎮 **{GAME_NAMES[game_type]}**\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💰 شرط: {bet} {CURRENCY_NAME}\n"
+                f"👥 بازیکنان: 1/{GAME_MAX_PLAYERS[game_type]}\n"
+                f"\n🔄 منتظر ورود بازیکنان دیگر..."
+            )
+            
+            sent_msg = await update.message.reply_text(
+                msg_text,
+                reply_markup=room_control_keyboard(room),
+                parse_mode="Markdown"
+            )
+            room.message_id = sent_msg.message_id
+            
+            context.user_data["awaiting_bet"] = False
+            context.user_data["temp_game"] = None
+            
+        else:
+            await update.message.reply_text("❌ لطفاً یک عدد معتبر وارد کنید!")
         return
 
 # ============================================================
@@ -1063,8 +1086,11 @@ def main():
         logger.error("❌ BOT_TOKEN تنظیم نشده!")
         return
     
-    init_db()
-    logger.info("✅ دیتابیس راه‌اندازی شد")
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"❌ خطا در راه‌اندازی دیتابیس: {e}")
+        return
     
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT, message_handler))
