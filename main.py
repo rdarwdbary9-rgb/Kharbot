@@ -86,6 +86,12 @@ def init_db():
                 equipped_accessory TEXT DEFAULT '',
                 FOREIGN KEY(user_id) REFERENCES users(user_id))""")
             db.commit()
+            # مهاجرت: ستون‌های جدید (اگر دیتابیس قدیمی باشد)
+            existing = {r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()}
+            for col in ["last_work", "last_wheel", "last_rob", "last_fortune", "sound_count"]:
+                if col not in existing:
+                    db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+            db.commit()
         logger.info(f"✅ دیتابیس در {DB_FILE} راه‌اندازی شد")
     except sqlite3.OperationalError as e:
         logger.error(f"❌ خطا در راه‌اندازی دیتابیس: {e}")
@@ -289,20 +295,43 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 SOUND_KEYWORDS = {
-    "عر": {"sound": "عر عر عر", "desc": "صدای معمولی خر"},
-    "عرعر": {"sound": "عر عر عر عر", "desc": "صدای پشت سر هم"},
-    "عرر": {"sound": "عررررررر", "desc": "صدای کشیده"},
-    "ترک": {"sound": "عر-عر-عر-عر (ترک!)", "desc": "صدای شکسته"},
-    "تورک": {"sound": "عررررررررر (تورک!)", "desc": "صدای پیچیده"}
+    "عر":        {"sound": "عَر عَر عَر 🔊",                       "desc": "صدای معمولی خر",        "min": 1,  "max": 20, "rare": 0.05},
+    "عرعر":      {"sound": "عَرعَرعَرعَرعَر 📢",                    "desc": "رگبار عرعر",            "min": 3,  "max": 25, "rare": 0.06},
+    "عرر":       {"sound": "عَررررررررررر 🌬️",                    "desc": "عر کشیده و سوزناک",     "min": 3,  "max": 25, "rare": 0.06},
+    "ترک":       {"sound": "عَر-عَر-عَر... تِرِک! 💔",              "desc": "صدای شکسته و دلخراش",   "min": 5,  "max": 30, "rare": 0.07},
+    "تورک":      {"sound": "عَرررر بۆیله عَرررر 🌀",               "desc": "عر با لهجه تورکی",      "min": 5,  "max": 30, "rare": 0.07},
+    "عراپرا":    {"sound": "🎵 عَرا-پَرا عَرا-پَرا 🕺",             "desc": "عر ریتمیک رقصیدنی",     "min": 8,  "max": 35, "rare": 0.08},
+    "عرملایم":   {"sound": "عـِـر... عـِـر... 🎻",                  "desc": "عر رمانتیک زیر نور ماه", "min": 8,  "max": 35, "rare": 0.08},
+    "عرجنگی":    {"sound": "عَ‌ررررر!!! ⚔️🔥",                     "desc": "نعره جنگی خر وحشی",     "min": 10, "max": 40, "rare": 0.09},
+    "عراپرایی":  {"sound": "🎭 عَ‌ره‌ره‌ره‌ریرا~ 🎶",                "desc": "عر اپرایی سوپرانو",     "min": 12, "max": 45, "rare": 0.10},
+    "عرغمگین":   {"sound": "عـِـر... 😢💧",                        "desc": "عر غمگین بارونی",       "min": 10, "max": 40, "rare": 0.09},
+    "عرشاد":     {"sound": "عَر عَر هورااا! 🎉🥳",                  "desc": "عر جشن و پایکوبی",      "min": 10, "max": 40, "rare": 0.09},
+    "عرخفن":     {"sound": "😎 عَر. فقط همین. 🕶️",                "desc": "عر باکلاس و لاکچری",    "min": 15, "max": 50, "rare": 0.12}
 }
 
+# رتبه‌های عرعرکردن بر اساس تعداد کل صداها
+SOUND_RANKS = [
+    (0,   "🔇 خر ساکت"),
+    (10,  "🔈 عرعرکار مبتدی"),
+    (30,  "🔉 عرعرکار نیمه‌حرفه‌ای"),
+    (75,  "🔊 عرعرکار حرفه‌ای"),
+    (150, "📢 استاد عرعر"),
+    (300, "🎺 سلطان عرعر"),
+    (600, "👑 اسطوره عرعر خرستان")
+]
+
+def get_sound_rank(count):
+    rank = SOUND_RANKS[0][1]
+    for need, name in SOUND_RANKS:
+        if count >= need:
+            rank = name
+    return rank
+
 SOUND_COOLDOWN = 120
-MIN_REWARD = 0
-MAX_REWARD = 20
 
 async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    text = update.message.text.strip()
+    text = update.message.text.strip().replace(" ", "")
     ensure_user(user.id, user.first_name)
     u = get_user(user.id)
     if not u: return
@@ -315,13 +344,14 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
         minutes = remaining // 60
         seconds = remaining % 60
         await update.message.reply_text(
-            f"⏳ {minutes} دقیقه و {seconds} ثانیه صبر کن تا دوباره صدا بدی! 🐴"
+            f"⏳ حنجره‌ات خسته‌ست! {minutes} دقیقه و {seconds} ثانیه استراحت بده 🐴💤"
         )
         return
     
+    # طولانی‌ترین کلید منطبق را پیدا کن (عرخفن قبل از عر)
     keyword = None
-    for key in SOUND_KEYWORDS.keys():
-        if key in text:
+    for key in sorted(SOUND_KEYWORDS.keys(), key=len, reverse=True):
+        if key == text:
             keyword = key
             break
     
@@ -329,30 +359,394 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     sound_info = SOUND_KEYWORDS[keyword]
-    reward = random.randint(MIN_REWARD, MAX_REWARD)
+    reward = random.randint(sound_info["min"], sound_info["max"])
     bonus = ""
     
-    if random.random() < 0.05:
-        reward = random.randint(20, 50)
-        bonus = "\n🎉 **جایزه ویژه!**"
+    if random.random() < sound_info["rare"]:
+        extra = random.randint(30, 80)
+        reward += extra
+        bonus = f"\n🌟 **عر طلایی!** پژواکش کل طویله رو لرزوند! +{extra} {CURRENCY_NAME}"
     
     if reward > 0:
         add_coins(user.id, reward)
     
+    sound_count = (u["sound_count"] or 0) + 1
     with closing(db_connect()) as db:
-        db.execute("UPDATE users SET last_sound = ? WHERE user_id = ?", (now, user.id))
+        db.execute("UPDATE users SET last_sound = ?, sound_count = ? WHERE user_id = ?",
+                  (now, sound_count, user.id))
         db.commit()
+    
+    rank = get_sound_rank(sound_count)
     
     await update.message.reply_text(
         f"🔊 **صدای خر!**\n"
         f"━━━━━━━━━━━━━━\n"
         f"🎤 {sound_info['sound']}\n"
         f"📝 {sound_info['desc']}\n"
-        f"\n👤 {esc_md(user.first_name)} عر کشید! 🐴\n"
-        f"💰 جایزه: **{reward}** {CURRENCY_NAME}"
-        f"{bonus}",
+        f"\n👤 {esc_md(user.first_name)} عر کشید!\n"
+        f"💰 پوینت: **+{reward}** {CURRENCY_NAME}"
+        f"{bonus}\n"
+        f"\n🏅 رتبه عرعر: {rank}\n"
+        f"🔢 تعداد کل عرها: {sound_count}\n"
+        f"💡 «صداها» رو بزن تا همه صداها رو ببینی!",
         parse_mode="Markdown"
     )
+
+SOUNDS_LIST_TEXT = (
+    "🔊 **لیست صداهای خر — هر کدوم پوینت خودش رو داره!**\n"
+    "━━━━━━━━━━━━━━\n" +
+    "\n".join(
+        f"`{k}` — {v['desc']} ({v['min']}-{v['max']} 🪙)"
+        for k, v in SOUND_KEYWORDS.items()
+    ) +
+    "\n\n🌟 هر صدا شانس **عر طلایی** داره (تا +80 اضافه!)\n"
+    "🏅 با عرعر بیشتر، رتبه‌ات بالا می‌ره:\n" +
+    "\n".join(f"{name} — {need} عر" for need, name in SOUND_RANKS) +
+    "\n\n⏳ هر ۲ دقیقه یک بار می‌تونی صدا بدی."
+)
+
+# ============================================================
+# کار کردن
+# ============================================================
+
+WORK_COOLDOWN = 3600  # هر ۱ ساعت
+
+WORK_JOBS = [
+    {"name": "🌾 گاری‌کشی توی مزرعه", "min": 50, "max": 150},
+    {"name": "🧱 آجرکشی سر ساختمون", "min": 60, "max": 170},
+    {"name": "🚕 مسافرکشی با گاری", "min": 40, "max": 200},
+    {"name": "🎪 بازیگری توی سیرک", "min": 30, "max": 250},
+    {"name": "📦 باربری بازار", "min": 70, "max": 160},
+    {"name": "🎨 مدل نقاشی نقاش‌های خیابونی", "min": 20, "max": 220},
+    {"name": "🏇 مسابقه دو با اسب‌ها", "min": 10, "max": 300},
+    {"name": "🧹 نظافت طویله همسایه", "min": 80, "max": 140}
+]
+
+WORK_FAILS = [
+    "وسط کار خوابت برد و صاحب‌کار بیرونت کرد! 😴",
+    "جفتک انداختی به مشتری و اخراج شدی! 🦵",
+    "گاری چپ شد و همه بارش ریخت! 🛒💥",
+    "به جای کار، رفتی یونجه خوردی! 🌾😋"
+]
+
+async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    u = get_user(user.id)
+    if not u: return
+    
+    now = int(time.time())
+    last_work = u["last_work"] or 0
+    
+    if now - last_work < WORK_COOLDOWN:
+        remaining = WORK_COOLDOWN - (now - last_work)
+        await update.message.reply_text(
+            f"😮‍💨 هنوز خسته‌ای! {remaining // 60} دقیقه دیگه بیا سر کار 🐴"
+        )
+        return
+    
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET last_work = ? WHERE user_id = ?", (now, user.id))
+        db.commit()
+    
+    job = random.choice(WORK_JOBS)
+    
+    # ۱۵٪ احتمال شکست خنده‌دار
+    if random.random() < 0.15:
+        fail = random.choice(WORK_FAILS)
+        await update.message.reply_text(
+            f"💼 **کار: {job['name']}**\n━━━━━━━━━━━━━━\n"
+            f"❌ {fail}\n💸 دستمزد: صفر! یک ساعت دیگه دوباره تلاش کن.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    wage = random.randint(job["min"], job["max"])
+    add_coins(user.id, wage)
+    await update.message.reply_text(
+        f"💼 **کار: {job['name']}**\n━━━━━━━━━━━━━━\n"
+        f"👤 {esc_md(user.first_name)} یه ساعت جون کند...\n"
+        f"💰 دستمزد: **+{wage}** {CURRENCY_NAME}\n\n"
+        f"⏰ یک ساعت دیگه دوباره می‌تونی کار کنی!",
+        parse_mode="Markdown"
+    )
+
+# ============================================================
+# گردونه شانس
+# ============================================================
+
+WHEEL_COOLDOWN = 10800  # هر ۳ ساعت
+WHEEL_PRIZES = [
+    (25, "💨 هیچی! گردونه خالی چرخید", 0),
+    (25, "🪙 یه مشت سکه", 50),
+    (20, "💰 کیسه سکه", 150),
+    (15, "💎 جواهر کوچیک", 300),
+    (10, "🏆 گنج طویله", 600),
+    (4,  "👑 جکپات سلطنتی", 1500),
+    (1,  "🌟 گنج افسانه‌ای خرستان", 5000)
+]
+
+async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    u = get_user(user.id)
+    if not u: return
+    
+    now = int(time.time())
+    last_wheel = u["last_wheel"] or 0
+    
+    if now - last_wheel < WHEEL_COOLDOWN:
+        remaining = WHEEL_COOLDOWN - (now - last_wheel)
+        await update.message.reply_text(
+            f"🎡 گردونه داغ کرده! {remaining // 3600} ساعت و {(remaining % 3600) // 60} دقیقه دیگه بیا!"
+        )
+        return
+    
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET last_wheel = ? WHERE user_id = ?", (now, user.id))
+        db.commit()
+    
+    roll = random.uniform(0, 100)
+    acc = 0
+    prize_name, prize_coins = WHEEL_PRIZES[0][1], WHEEL_PRIZES[0][2]
+    for chance, name, coins in WHEEL_PRIZES:
+        acc += chance
+        if roll <= acc:
+            prize_name, prize_coins = name, coins
+            break
+    
+    if prize_coins > 0:
+        add_coins(user.id, prize_coins)
+        result = f"🎊 {prize_name}\n💰 جایزه: **+{prize_coins}** {CURRENCY_NAME}"
+    else:
+        result = f"{prize_name} 😅\nشانست رو ۳ ساعت دیگه امتحان کن!"
+    
+    await update.message.reply_text(
+        f"🎡 **گردونه شانس طویله**\n━━━━━━━━━━━━━━\n"
+        f"🌀 گردونه چرخید و چرخید...\n\n"
+        f"👤 {esc_md(user.first_name)}\n{result}",
+        parse_mode="Markdown"
+    )
+
+# ============================================================
+# دزدی
+# ============================================================
+
+ROB_COOLDOWN = 7200  # هر ۲ ساعت
+ROB_SUCCESS_CHANCE = 0.40
+ROB_FINE_PERCENT = 0.05
+
+ROB_SUCCESS_TEXTS = [
+    "نصفه‌شب یواشکی رفتی توی طویله‌اش و زدی به چاک! 🌙🏃",
+    "با نقاب خرکی سر گردنه رو زدی! 🎭",
+    "وقتی داشت یونجه می‌خورد جیبش رو زدی! 🌾🤏"
+]
+ROB_FAIL_TEXTS = [
+    "صاحب طویله با بیل دنبالت کرد! 🪏💨",
+    "پات به سطل گیر کرد و افتادی، همه بیدار شدن! 🪣💥",
+    "سگ نگهبان گرفتت! جریمه شدی! 🐕⛓️"
+]
+
+async def rob_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    
+    if not update.message.reply_to_message:
+        await update.message.reply_text("🦹 روی پیام کسی که می‌خوای ازش بدزدی **ریپلی** بزن و بنویس `دزدی`", parse_mode="Markdown")
+        return
+    
+    target = update.message.reply_to_message.from_user
+    if target.id == user.id:
+        await update.message.reply_text("❌ از خودت می‌خوای بدزدی؟! 😂")
+        return
+    if target.is_bot:
+        await update.message.reply_text("❌ از ربات نمی‌شه دزدید! 🤖")
+        return
+    
+    ensure_user(target.id, target.first_name)
+    u = get_user(user.id)
+    t = get_user(target.id)
+    
+    now = int(time.time())
+    last_rob = u["last_rob"] or 0
+    if now - last_rob < ROB_COOLDOWN:
+        remaining = ROB_COOLDOWN - (now - last_rob)
+        await update.message.reply_text(f"🚔 پلیس طویله دنبالته! {remaining // 60} دقیقه صبر کن!")
+        return
+    
+    if t["coins"] < 100:
+        await update.message.reply_text(f"😅 {esc_md(target.first_name)} انقدر فقیره که چیزی برای دزدیدن نداره!")
+        return
+    
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET last_rob = ? WHERE user_id = ?", (now, user.id))
+        db.commit()
+    
+    if random.random() < ROB_SUCCESS_CHANCE:
+        # موفق: ۳ تا ۱۰ درصد پول هدف
+        loot = max(10, int(t["coins"] * random.uniform(0.03, 0.10)))
+        loot = min(loot, 2000)  # سقف دزدی
+        with closing(db_connect()) as db:
+            db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (loot, target.id))
+            db.commit()
+        add_coins(user.id, loot)
+        story = random.choice(ROB_SUCCESS_TEXTS)
+        await update.message.reply_text(
+            f"🦹 **دزدی موفق!**\n━━━━━━━━━━━━━━\n"
+            f"{story}\n\n"
+            f"💰 {esc_md(user.first_name)} مبلغ **{loot}** {CURRENCY_NAME} از {esc_md(target.first_name)} دزدید! 🏃💨",
+            parse_mode="Markdown"
+        )
+    else:
+        fine = max(20, int(u["coins"] * ROB_FINE_PERCENT))
+        fine = min(fine, 1000)
+        with closing(db_connect()) as db:
+            db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (fine, user.id))
+            db.commit()
+        story = random.choice(ROB_FAIL_TEXTS)
+        await update.message.reply_text(
+            f"🚨 **دزدی ناموفق!**\n━━━━━━━━━━━━━━\n"
+            f"{story}\n\n"
+            f"💸 {esc_md(user.first_name)} جریمه شد: **-{fine}** {CURRENCY_NAME} 😭",
+            parse_mode="Markdown"
+        )
+
+# ============================================================
+# فال خرستان
+# ============================================================
+
+FORTUNE_COOLDOWN = 21600  # هر ۶ ساعت
+
+FORTUNES = [
+    ("🌟 امروز روز شانسته! یه عر بلند بکش!", 50),
+    ("💰 ثروت بزرگی در راهه... شاید هم یونجه باشه!", 30),
+    ("❤️ یک خر جذاب به زندگیت وارد می‌شه!", 20),
+    ("🎲 امروز توی قمار دستت داغه! (شایدم نه 😏)", 25),
+    ("🐴 خر درونت رو آزاد کن، موفقیت نزدیکه!", 35),
+    ("🌈 بعد از هر عرعری، رنگین‌کمونی هست!", 15),
+    ("⚠️ مواظب باش! یکی می‌خواد ازت بدزده!", 10),
+    ("🦄 تو فقط یه خر نیستی، یه تک‌شاخ در حال پیشرفتی!", 40),
+    ("📿 ستاره‌ها می‌گن: کمتر جفتک بنداز، بیشتر پس‌انداز کن!", 20),
+    ("🔮 عدد شانس امروزت: عر!", 30)
+]
+
+async def fortune_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    u = get_user(user.id)
+    if not u: return
+    
+    now = int(time.time())
+    last_fortune = u["last_fortune"] or 0
+    if now - last_fortune < FORTUNE_COOLDOWN:
+        remaining = FORTUNE_COOLDOWN - (now - last_fortune)
+        await update.message.reply_text(f"🔮 گوی جادویی خوابیده! {remaining // 3600} ساعت و {(remaining % 3600) // 60} دقیقه دیگه بیا.")
+        return
+    
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET last_fortune = ? WHERE user_id = ?", (now, user.id))
+        db.commit()
+    
+    text_f, coins = random.choice(FORTUNES)
+    add_coins(user.id, coins)
+    
+    await update.message.reply_text(
+        f"🔮 **فال خرستان**\n━━━━━━━━━━━━━━\n"
+        f"👤 {esc_md(user.first_name)} عزیز:\n\n"
+        f"«{text_f}»\n\n"
+        f"🎁 برکت فال: **+{coins}** {CURRENCY_NAME}",
+        parse_mode="Markdown"
+    )
+
+# ============================================================
+# انتقال سکه بین کاربران
+# ============================================================
+
+TRANSFER_MIN = 10
+TRANSFER_MAX = 50000
+
+async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    
+    if not update.message.reply_to_message:
+        await update.message.reply_text("💸 روی پیام طرف **ریپلی** بزن و بنویس: `انتقال 100`", parse_mode="Markdown")
+        return
+    
+    target = update.message.reply_to_message.from_user
+    if target.id == user.id:
+        await update.message.reply_text("❌ به خودت می‌خوای پول بدی؟! 😂")
+        return
+    if target.is_bot:
+        await update.message.reply_text("❌ ربات پول نمی‌خواد! 🤖")
+        return
+    
+    if amount < TRANSFER_MIN or amount > TRANSFER_MAX:
+        await update.message.reply_text(f"❌ مبلغ باید بین {TRANSFER_MIN} تا {TRANSFER_MAX:,} باشه!")
+        return
+    
+    ensure_user(target.id, target.first_name)
+    
+    if not remove_coins(user.id, amount):
+        u = get_user(user.id)
+        await update.message.reply_text(f"❌ موجودی کافی نداری! داری: {u['coins']:,} {CURRENCY_NAME}")
+        return
+    
+    add_coins(target.id, amount)
+    await update.message.reply_text(
+        f"💸 **انتقال موفق!**\n━━━━━━━━━━━━━━\n"
+        f"👤 {esc_md(user.first_name)} ⬅️ {esc_md(target.first_name)}\n"
+        f"💰 مبلغ: **{amount:,}** {CURRENCY_NAME}\n\n"
+        f"🤝 دمت گرم، رفاقت یعنی این!",
+        parse_mode="Markdown"
+    )
+
+# ============================================================
+# نمایش خر شخصی
+# ============================================================
+
+def donkey_art(user_id):
+    """نمایش خر کاربر با وسایلش"""
+    donkey = get_donkey(user_id)
+    u = get_user(user_id)
+    if not u:
+        return "❌ کاربر پیدا نشد."
+    
+    hat = "🎩" if donkey and donkey["equipped_hat"] else "  "
+    tie = "👔" if donkey and donkey["equipped_tie"] else ""
+    acc = "🎀" if donkey and donkey["equipped_accessory"] else ""
+    shoe = "👟" if donkey and donkey["equipped_horseshoe"] else ""
+    
+    art = (
+        f"      {hat}\n"
+        f"   🐴 {acc}\n"
+        f"  ╱|  {tie}\n"
+        f" ╱ |╲_🐾\n"
+        f"   {shoe}  {shoe}\n"
+    )
+    
+    items = []
+    if donkey:
+        pretty = {
+            "equipped_hat": "🎩", "equipped_saddle": "🐴", "equipped_horseshoe": "👟",
+            "equipped_tie": "👔", "equipped_clothes": "👕", "equipped_accessory": "🎀"
+        }
+        for col, emo in pretty.items():
+            if donkey[col]:
+                items.append(f"{emo} {donkey[col]}")
+    
+    title = get_title_by_level(u["level"])
+    msg = (
+        f"🐴 **خرِ {esc_md(u['name'])}**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"```\n{art}```\n"
+        f"🏅 لقب: {title}\n"
+    )
+    if items:
+        msg += "🎒 تجهیزات:\n" + "\n".join(items)
+    else:
+        msg += "🎒 تجهیزات: لخت و پتی! برو فروشگاه 🏪"
+    return msg
 
 # ============================================================
 # جفت‌گیری
@@ -475,6 +869,25 @@ GAME_MAX_PLAYERS = {
 
 # بازی‌هایی که دقیقاً ۲ نفره هستند
 TWO_PLAYER_GAMES = {"rps", "ttt", "coinflip"}
+
+# اسم فارسی بازی‌ها برای دستور متنی (مثلاً: انفجار 100)
+GAME_ALIASES = {
+    "انفجار": "crash",
+    "تاس": "dice",
+    "رولت": "roulette",
+    "پوکر": "poker",
+    "بلک‌جک": "blackjack",
+    "بلک": "blackjack",
+    "21": "blackjack",
+    "۲۱": "blackjack",
+    "دوز": "ttt",
+    "سنگ": "rps",
+    "قیچی": "rps",
+    "شیرخط": "coinflip",
+    "شیر": "coinflip",
+    "حدس": "hilo",
+    "بالاپایین": "hilo"
+}
 
 # ============================================================
 # مدیریت اتاق‌ها
@@ -625,7 +1038,8 @@ def main_menu():
         [InlineKeyboardButton("🎮 بازی‌ها", callback_data="games_list")],
         [InlineKeyboardButton("👤 پروفایل", callback_data="show_profile"), 
          InlineKeyboardButton("🏪 فروشگاه", callback_data="shop")],
-        [InlineKeyboardButton("🏆 جدول", callback_data="leaderboard")]
+        [InlineKeyboardButton("🏆 جدول", callback_data="leaderboard"),
+         InlineKeyboardButton("📖 راهنما", callback_data="help_main")]
     ])
 
 def games_menu():
@@ -1518,27 +1932,136 @@ def parse_bet_arg(parts):
         return None
     return bet
 
+async def start_room_from_text(update, context, game_type, bet):
+    """ساخت اتاق بازی مستقیم با دستور فارسی مثل «انفجار 100»"""
+    user = update.effective_user
+    
+    if user.id in PLAYER_IN_GAME:
+        await update.message.reply_text("⚠️ شما در یک بازی دیگر هستید! اول اون رو تموم کن.")
+        return
+    
+    u = get_user(user.id)
+    if u["coins"] < bet:
+        await update.message.reply_text(f"❌ پول کافی نداری! موجودی: {u['coins']:,} {CURRENCY_NAME}")
+        return
+    
+    remove_coins(user.id, bet)
+    room = create_room(update.effective_chat.id, game_type, user.id, bet)
+    
+    two_p = "👥 بازی ۲ نفره" if game_type in TWO_PLAYER_GAMES else f"👥 ۲ تا {GAME_MAX_PLAYERS[game_type]} نفره"
+    msg_text = (
+        f"🎮 **{GAME_NAMES[game_type]}**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"💰 شرط: {bet} {CURRENCY_NAME}\n"
+        f"{two_p}\n"
+        f"👤 سازنده: {esc_md(user.first_name)}\n"
+        f"\n🔄 منتظر ورود بازیکنان دیگر..."
+    )
+    
+    sent_msg = await update.message.reply_text(
+        msg_text,
+        reply_markup=room_control_keyboard(room),
+        parse_mode="Markdown"
+    )
+    room.message_id = sent_msg.message_id
+
+# ============================================================
+# کادوهای مالک
+# ============================================================
+
+OWNER_GIFTS = {
+    "گل": {"emoji": "🌹", "coins": 100},
+    "شکلات": {"emoji": "🍫", "coins": 250},
+    "کیک": {"emoji": "🎂", "coins": 500},
+    "خرس": {"emoji": "🧸", "coins": 1000},
+    "گردنبند": {"emoji": "📿", "coins": 2500},
+    "الماس": {"emoji": "💎", "coins": 5000},
+    "ماشین": {"emoji": "🚗", "coins": 10000},
+    "خونه": {"emoji": "🏠", "coins": 25000}
+}
+
 # ============================================================
 # هندلر پیام‌ها
 # ============================================================
 
-HELP_TEXT = (
-    "🫏 **راهنمای طویله خرستان**\n"
+HELP_MAIN_TEXT = (
+    "📖 **راهنمای کامل طویله خرستان** 🫏\n"
     "━━━━━━━━━━━━━━\n"
-    "🎮 **بازی‌های گروهی** (از منو → بازی‌ها):\n"
-    "✊ سنگ‌کاغذقیچی، ❌⭕ دوز، 🪙 شیر یا خط (۲ نفره)\n"
-    "🃏 بلک‌جک، 🎰 پوکر (تا ۶ نفر)\n"
-    "💥 انفجار، 🎲 تاس، 🔫 رولت روسی، 🔼 بالا/پایین (تا ۱۰ نفر)\n\n"
-    "🎰 **بازی‌های فوری** (تایپ کن):\n"
-    "`اسلات 100` — اسلات ماشین\n"
-    "`دوبل 100` — دوبل یا هیچی\n\n"
-    "💬 **دستورات متنی:**\n"
-    "روزانه — جایزه روزانه 🎁\n"
-    "پروفایل — مشخصات تو 👤\n"
-    "سکه — موجودی 💰\n"
-    "جدول — ثروتمندان 🏆\n"
-    "عر — صدای خر بده و جایزه بگیر 🔊\n"
-    "جفت‌گیری (با ریپلی) — کره‌خر دار شو ❤️"
+    "یه بخش رو انتخاب کن تا همه دستوراتش رو ببینی:"
+)
+
+HELP_SECTIONS = {
+    "help_games": (
+        "🎮 **بازی‌های گروهی** — اسم بازی + شرط:\n"
+        "━━━━━━━━━━━━━━\n"
+        "💥 `انفجار 100` — ضریب بالا می‌ره، قبل انفجار برداشت کن! (تا ۱۰ نفر)\n"
+        "🎲 `تاس 100` — بالاترین تاس می‌بره (تا ۱۰ نفر)\n"
+        "🔫 `رولت 100` — آخرین بازمانده همه رو می‌بره (تا ۱۰ نفر)\n"
+        "🔼🔽 `حدس 100` — حدس مجموع دو تاس، دقیقاً ۷ = x5 (تا ۱۰ نفر)\n"
+        "🎰 `پوکر 100` — بهترین دست ۵ کارتی می‌بره (تا ۶ نفر)\n"
+        "🃏 `بلک‌جک 100` — نزدیک‌ترین به ۲۱ بدون سوختن (تا ۶ نفر)\n"
+        "❌⭕ `دوز 100` — سه‌تا ردیف کن! (۲ نفره)\n"
+        "✊ `سنگ 100` — سنگ‌کاغذقیچی (۲ نفره)\n"
+        "🪙 `شیرخط 100` — شانس خالص! (۲ نفره)\n\n"
+        "🎰 **بازی فوری تکی:**\n"
+        "`اسلات 100` — سه‌تایی 7️⃣ = x20 جکپات!\n"
+        "`دوبل 100` — شانس ۵۰-۵۰، دوبل یا هیچی!\n\n"
+        "💡 بازی‌های ۲ نفره با ورود نفر دوم خودکار شروع می‌شن."
+    ),
+    "help_money": (
+        "💰 **راه‌های پول درآوردن:**\n"
+        "━━━━━━━━━━━━━━\n"
+        "🎁 `روزانه` — جایزه روزانه (هر ۲۴ ساعت)\n"
+        "💼 `کار` — برو سر کار، دستمزد بگیر (هر ۱ ساعت)\n"
+        "🎡 `گردونه` — گردونه شانس، تا ۵۰۰۰ جایزه! (هر ۳ ساعت)\n"
+        "🔮 `فال` — فالت رو بگیر + برکت (هر ۶ ساعت)\n"
+        "🔊 عرعر کن! — هر صدا پوینت داره (هر ۲ دقیقه)\n"
+        "🦹 `دزدی` (با ریپلی) — ۴۰٪ شانس، ولی جریمه داره! (هر ۲ ساعت)\n"
+        "💸 `انتقال 100` (با ریپلی) — سکه بده به رفیقت\n\n"
+        "⚠️ مواظب باش: توی دزدی اگه گیر بیفتی جریمه می‌شی!"
+    ),
+    "help_sounds": SOUNDS_LIST_TEXT,
+    "help_donkey": (
+        "🐴 **خر شخصی تو:**\n"
+        "━━━━━━━━━━━━━━\n"
+        "🐴 `خرم` — نمایش خرت با تجهیزاتش\n"
+        "🏪 `فروشگاه` — خرید کلاه، زین، نعل، کروات، لباس، اکسسوری\n"
+        "👤 `پروفایل` — مشخصات کامل (با ریپلی: پروفایل بقیه)\n"
+        "❤️ `جفت‌گیری` (با ریپلی) — کره‌خر دار شو! (سطح ۲ لازمه، ۵۰۰ سکه)\n"
+        "⭐ با پول بیشتر، سطح و لقبت بالاتر می‌ره:\n"
+        "🐣 کره‌خر تازه‌کار → ... → 👑 خدا خرها"
+    ),
+    "help_other": (
+        "📋 **بقیه دستورات:**\n"
+        "━━━━━━━━━━━━━━\n"
+        "🏠 `منو` — منوی اصلی\n"
+        "🎮 `بازی‌ها` — لیست بازی‌ها\n"
+        "💰 `سکه` — موجودیت\n"
+        "🏆 `جدول` — ثروتمندان طویله\n"
+        "🔊 `صداها` — لیست همه صداهای خر\n"
+        "📖 `راهنما` — همین راهنما\n"
+        "/start — پیام خوش‌آمد"
+    )
+}
+
+def help_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🎮 بازی‌ها", callback_data="help_games"),
+         InlineKeyboardButton("💰 پول درآوردن", callback_data="help_money")],
+        [InlineKeyboardButton("🔊 صداهای خر", callback_data="help_sounds"),
+         InlineKeyboardButton("🐴 خر شخصی", callback_data="help_donkey")],
+        [InlineKeyboardButton("📋 بقیه دستورات", callback_data="help_other")],
+        [InlineKeyboardButton("🏠 منوی اصلی", callback_data="home")]
+    ])
+
+OWNER_HELP_TEXT = (
+    "👑 **دستورات مالک** (همه با ریپلی):\n"
+    "━━━━━━━━━━━━━━\n"
+    "`+سکه 1000` — سکه دادن 💰\n"
+    "`-سکه 1000` — کسر سکه 🔥\n"
+    "`کادو گل` — کادو دادن 🎁\n"
+    "`بن` / `انبن` — بن و آنبن 🚫\n\n"
+    "🎁 **کادوها:** گل 🌹(100) | شکلات 🍫(250) | کیک 🎂(500) | خرس 🧸(1000) | گردنبند 📿(2500) | الماس 💎(5000) | ماشین 🚗(10000) | خونه 🏠(25000)"
 )
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1558,16 +2081,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== شروع =====
     if text.startswith("/start"):
         await update.message.reply_text(
-            "🫏 **به طویله خرستان خوش آمدید!**\n\n"
-            "با ربات ما می‌توانید:\n"
-            "• 🎮 ۹ بازی گروهی انجام دهید\n"
-            "• 🎰 اسلات و دوبل بازی کنید\n"
-            "• 🏆 با دوستان مسابقه دهید\n"
-            "• 🎁 جایزه روزانه بگیرید\n"
-            "• 🔊 صدای خر بدهید و جایزه بگیرید\n"
-            "• ❤️ جفت‌گیری کنید و کره‌خر داشته باشید\n"
-            "• 🎀 خر خود را تزئین کنید\n\n"
-            "برای راهنما بنویس: **راهنما**",
+            "🫏✨ **به طویله خرستان خوش آمدید!** ✨🫏\n"
+            "━━━━━━━━━━━━━━\n"
+            "🎮 ۹ بازی گروهی + اسلات و دوبل\n"
+            "🔊 ۱۲ صدای خر با پوینت و رتبه‌بندی\n"
+            "💼 کار کن، 🎡 گردونه بچرخون، 🔮 فال بگیر\n"
+            "🦹 از رفیقات بدزد (به ریسک خودت! 😏)\n"
+            "🎁 جایزه روزانه + 💸 انتقال سکه به رفیقا\n"
+            "❤️ جفت‌گیری کن و کره‌خر دار شو\n"
+            "🎀 خرت رو خوشتیپ کن و به همه پز بده\n"
+            "━━━━━━━━━━━━━━\n"
+            "📖 برای دیدن همه دستورات: **راهنما**",
             reply_markup=main_menu(),
             parse_mode="Markdown"
         )
@@ -1575,7 +2099,82 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== راهنما =====
     if text in ["راهنما", "help", "/help", "کمک"]:
-        await update.message.reply_text(HELP_TEXT, reply_markup=main_menu(), parse_mode="Markdown")
+        msg = HELP_MAIN_TEXT
+        if user.id == OWNER_ID:
+            msg += "\n\n" + OWNER_HELP_TEXT
+        await update.message.reply_text(msg, reply_markup=help_keyboard(), parse_mode="Markdown")
+        return
+    
+    # ===== لیست صداها =====
+    if text in ["صداها", "صدا", "sounds"]:
+        await update.message.reply_text(SOUNDS_LIST_TEXT, parse_mode="Markdown")
+        return
+    
+    # ===== کار =====
+    if text in ["کار", "work", "کارکردن"]:
+        await work_command(update, context)
+        return
+    
+    # ===== گردونه =====
+    if text in ["گردونه", "چرخ", "wheel"]:
+        await wheel_command(update, context)
+        return
+    
+    # ===== فال =====
+    if text in ["فال", "fortune", "طالع"]:
+        await fortune_command(update, context)
+        return
+    
+    # ===== دزدی =====
+    if text in ["دزدی", "سرقت", "rob"]:
+        await rob_command(update, context)
+        return
+    
+    # ===== نمایش خر =====
+    if text in ["خرم", "خر من", "donkey"]:
+        await update.message.reply_text(donkey_art(user.id), parse_mode="Markdown")
+        return
+    
+    # ===== انتقال سکه =====
+    parts_tr = text.split()
+    if parts_tr and parts_tr[0] in ["انتقال", "transfer", "هدیه"]:
+        if len(parts_tr) < 2:
+            await update.message.reply_text("💸 روش استفاده: روی پیام طرف ریپلی بزن و بنویس `انتقال 100`", parse_mode="Markdown")
+            return
+        val = parts_tr[1].translate(FA_DIGITS)
+        if not val.isdigit():
+            await update.message.reply_text("❌ مبلغ باید عدد باشه! مثال: `انتقال 100`", parse_mode="Markdown")
+            return
+        await transfer_command(update, context, int(val))
+        return
+    
+    # ===== منو =====
+    if text in ["منو", "menu", "خانه"]:
+        await update.message.reply_text(
+            "🏠 **منوی اصلی طویله**",
+            reply_markup=main_menu(),
+            parse_mode="Markdown"
+        )
+        return
+    
+    # ===== لیست بازی‌ها =====
+    if text in ["بازی", "بازی‌ها", "بازیها", "games"]:
+        await update.message.reply_text(
+            "🎮 **انتخاب بازی:**\n\n"
+            "می‌تونی مستقیم تایپ کنی: `انفجار 100`\n"
+            "یا از دکمه‌ها انتخاب کنی:",
+            reply_markup=games_menu(),
+            parse_mode="Markdown"
+        )
+        return
+    
+    # ===== فروشگاه =====
+    if text in ["فروشگاه", "شاپ", "shop"]:
+        await update.message.reply_text(
+            "🏪 **فروشگاه طویله**\nانتخاب کنید:",
+            reply_markup=shop_keyboard(),
+            parse_mode="Markdown"
+        )
         return
     
     # ===== جایزه روزانه =====
@@ -1631,7 +2230,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, row in enumerate(rows, 1):
             medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             title = get_title_by_level(row["level"])
-            msg += f"{medal} {title} {esc_md(row['name'])} — {row['coins']:,} {CURRENCY_NAME} (سطح {row['level']})\n"
+            msg += f"{medal} {title} {esc_md(row['name'])} — {row['coins']:,}\n"
         
         if user_row and user_row["rank"]:
             msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
@@ -1640,7 +2239,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # ===== صدای خر =====
-    if text in ["عر", "عرعر", "عرر", "ترک", "تورک"]:
+    if text.replace(" ", "") in SOUND_KEYWORDS:
         await donkey_sound(update, context)
         return
     
@@ -1660,6 +2259,18 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🎲 روش بازی: `دوبل 100` (حداقل {MIN_BET})", parse_mode="Markdown")
             return
         await double_game(update, context, bet)
+        return
+    
+    # ===== ساخت بازی گروهی با دستور فارسی (مثلاً: انفجار 100) =====
+    if parts_fa and parts_fa[0] in GAME_ALIASES:
+        game_type = GAME_ALIASES[parts_fa[0]]
+        bet = parse_bet_arg(parts_fa)
+        if bet is None:
+            await update.message.reply_text(
+                f"🎮 روش ساخت بازی: `{parts_fa[0]} 100` (حداقل شرط {MIN_BET})",
+                parse_mode="Markdown")
+            return
+        await start_room_from_text(update, context, game_type, bet)
         return
     
     # ============================================================
@@ -1685,9 +2296,28 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 db.commit()
             await update.message.reply_text(f"✅ {esc_md(target.first_name)} آنبن شد!")
             return
+        if cmd == "کادو" and len(parts) > 1:
+            gift_name = parts[1]
+            if gift_name not in OWNER_GIFTS:
+                gifts_list = " | ".join(f"{g}{OWNER_GIFTS[g]['emoji']}" for g in OWNER_GIFTS)
+                await update.message.reply_text(f"🎁 کادوهای موجود:\n{gifts_list}\n\nمثال: `کادو گل` (با ریپلی)", parse_mode="Markdown")
+                return
+            gift = OWNER_GIFTS[gift_name]
+            ensure_user(target.id, target.first_name)
+            add_coins(target.id, gift["coins"])
+            await update.message.reply_text(
+                f"🎁 **کادو از طرف مالک طویله!**\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"{gift['emoji']} یک **{gift_name}** به {esc_md(target.first_name)} هدیه داده شد!\n"
+                f"💰 ارزش: **{gift['coins']:,}** {CURRENCY_NAME}\n\n"
+                f"🥳 مبارکش باشه!",
+                parse_mode="Markdown"
+            )
+            return
         if cmd in ["/addcoin", "سکه", "+سکه"] and len(parts) > 1:
             try:
                 amt = int(parts[1].translate(FA_DIGITS))
+                ensure_user(target.id, target.first_name)
                 add_coins(target.id, amt)
                 await update.message.reply_text(f"💰 {amt:,} {CURRENCY_NAME} به {esc_md(target.first_name)} اضافه شد!")
             except (ValueError, IndexError):
@@ -1781,6 +2411,22 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     await query.answer()
+    
+    # ===== راهنما =====
+    if data == "help_main":
+        msg = HELP_MAIN_TEXT
+        if user.id == OWNER_ID:
+            msg += "\n\n" + OWNER_HELP_TEXT
+        await query.edit_message_text(msg, reply_markup=help_keyboard(), parse_mode="Markdown")
+        return
+    
+    if data in HELP_SECTIONS:
+        await query.edit_message_text(
+            HELP_SECTIONS[data],
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به راهنما", callback_data="help_main")]]),
+            parse_mode="Markdown"
+        )
+        return
     
     # ===== خانه =====
     if data == "home":
@@ -1937,7 +2583,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, row in enumerate(rows, 1):
             medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             title = get_title_by_level(row["level"])
-            msg += f"{medal} {title} {esc_md(row['name'])} — {row['coins']:,} {CURRENCY_NAME} (سطح {row['level']})\n"
+            msg += f"{medal} {title} {esc_md(row['name'])} — {row['coins']:,}\n"
         
         if user_row and user_row["rank"]:
             msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
