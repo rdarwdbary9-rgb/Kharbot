@@ -31,6 +31,13 @@ MAX_PLAYERS = 10
 
 CURRENCY_NAME = "تی‌تاپ"
 
+# 🤖 خر بات — حریف کامپیوتری
+BOT_ID = -777
+BOT_NAME = "🤖 خر بات"
+
+# ⏰ اگر بازی تا این مدت شروع نشد، خودکار لغو می‌شود
+ROOM_START_TIMEOUT = 120
+
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger("KHARBOT")
 
@@ -122,10 +129,13 @@ def get_donkey(user_id):
         return db.execute("SELECT * FROM donkeys WHERE user_id = ?", (user_id,)).fetchone()
 
 def uname(user_id):
+    if user_id == BOT_ID:
+        return BOT_NAME
     u = get_user(user_id)
     return esc_md(u["name"]) if u else "ناشناس"
 
 def add_coins(user_id, amount):
+    if user_id == BOT_ID: return True  # خر بات پول لازم نداره
     if amount <= 0: return False
     with closing(db_connect()) as db:
         db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (amount, user_id))
@@ -134,6 +144,7 @@ def add_coins(user_id, amount):
     return True
 
 def remove_coins(user_id, amount):
+    if user_id == BOT_ID: return True
     if amount <= 0: return False
     with closing(db_connect()) as db:
         row = db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,)).fetchone()
@@ -145,12 +156,14 @@ def remove_coins(user_id, amount):
     return True
 
 def record_win(user_id):
+    if user_id == BOT_ID: return
     with closing(db_connect()) as db:
         db.execute("UPDATE users SET wins = wins + 1 WHERE user_id = ?", (user_id,))
         db.commit()
     update_level(user_id)
 
 def record_loss(user_id):
+    if user_id == BOT_ID: return
     with closing(db_connect()) as db:
         db.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (user_id,))
         db.commit()
@@ -895,6 +908,23 @@ GAME_ALIASES = {
 
 ACTIVE_ROOMS = {}
 PLAYER_IN_GAME = {}
+
+# 🔒 مالکیت منوها: هر منویی که کاربر باز می‌کنه فقط خودش بتونه استفاده کنه
+# (دکمه‌های بازی مثل «ورود به بازی» برای همه آزاده)
+MENU_OWNERS = {}
+MENU_OWNERS_MAX = 500
+
+def register_menu(chat_id, message_id, user_id):
+    """ثبت اینکه این منو رو کی باز کرده"""
+    if len(MENU_OWNERS) >= MENU_OWNERS_MAX:
+        # حذف قدیمی‌ترین‌ها
+        for k in list(MENU_OWNERS.keys())[:100]:
+            MENU_OWNERS.pop(k, None)
+    MENU_OWNERS[(chat_id, message_id)] = user_id
+
+def menu_owner_of(chat_id, message_id):
+    return MENU_OWNERS.get((chat_id, message_id))
+
 ROOM_TTL = 3600          # اتاق منتظر، بعد از یک ساعت پاک می‌شود
 STARTED_TTL = 1800       # بازی گیرکرده، بعد از نیم ساعت پاک و شرط برگردانده می‌شود
 _ROOM_COUNTER = 0
@@ -1068,10 +1098,31 @@ def room_control_keyboard(room: GameRoom):
     if not room.started:
         if len(room.players) < room.max_players:
             buttons.append([InlineKeyboardButton("👥 ورود به بازی", callback_data=f"room_join_{room.room_id}")])
+        # 🤖 بازی با خر بات (وقتی هنوز جا هست و خر بات داخل نیست)
+        if BOT_ID not in room.players and len(room.players) < room.max_players:
+            buttons.append([InlineKeyboardButton("🤖 بازی با خر بات", callback_data=f"room_bot_{room.room_id}")])
         if len(room.players) >= 2:
             buttons.append([InlineKeyboardButton("▶️ شروع بازی", callback_data=f"room_start_{room.room_id}")])
         buttons.append([InlineKeyboardButton("❌ لغو", callback_data=f"room_cancel_{room.room_id}")])
     return InlineKeyboardMarkup(buttons)
+
+async def room_timeout_watch(room: GameRoom, context):
+    """⏰ اگر بازی تا ۲ دقیقه شروع نشد، خودکار لغو و شرط‌ها برگردانده شود"""
+    try:
+        await asyncio.sleep(ROOM_START_TIMEOUT)
+        current = ACTIVE_ROOMS.get(room.room_id)
+        if current is not room or room.started or room.finished:
+            return
+        for p in room.players:
+            add_coins(p, room.bet)
+        room.finished = True
+        cleanup_room(room.room_id)
+        await edit_room_msg(room, context,
+            f"⏰ **بازی {GAME_NAMES[room.game_type]} به دلیل عدم شروع، خودکار لغو شد!**\n"
+            f"💰 شرط همه بازیکنان برگشت داده شد.",
+            result_keyboard())
+    except Exception as e:
+        logger.warning(f"⚠️ خطا در تایمر لغو اتاق: {e}")
 
 # ============================================================
 # اطلاعات فروشگاه
@@ -1275,6 +1326,9 @@ def rps_keyboard(room):
 
 async def rps_begin(room, context):
     room.game_data = {"choices": {}}
+    # 🤖 خر بات مخفیانه انتخابش رو می‌کنه
+    if BOT_ID in room.players:
+        room.game_data["choices"][BOT_ID] = random.choice(["rock", "paper", "scissors"])
     p1, p2 = room.players[0], room.players[1]
     await edit_room_msg(
         room, context,
@@ -1319,6 +1373,8 @@ async def rps_action(room, context, query, choice):
     if c1 == c2:
         # مساوی → دور جدید
         gd["choices"] = {}
+        if BOT_ID in room.players:
+            gd["choices"][BOT_ID] = random.choice(["rock", "paper", "scissors"])
         await edit_room_msg(room, context, header + "🤝 مساوی! دوباره انتخاب کنید:", rps_keyboard(room))
         return
     
@@ -1350,6 +1406,24 @@ def ttt_winner(b):
             return b[a]
     return None
 
+def ttt_bot_move(board, my_mark, opp_mark):
+    """🤖 هوش خر بات در دوز: اول برد، بعد دفاع، بعد مرکز، بعد گوشه"""
+    empty = [i for i in range(9) if not board[i]]
+    lines = [(0,1,2),(3,4,5),(6,7,8),(0,3,6),(1,4,7),(2,5,8),(0,4,8),(2,4,6)]
+    # ۱. اگر می‌تونه ببره
+    for i in empty:
+        b = board[:]; b[i] = my_mark
+        if ttt_winner(b): return i
+    # ۲. اگر حریف داره می‌بره، سد کن
+    for i in empty:
+        b = board[:]; b[i] = opp_mark
+        if ttt_winner(b): return i
+    # ۳. مرکز، گوشه، بقیه
+    if 4 in empty: return 4
+    corners = [i for i in [0, 2, 6, 8] if i in empty]
+    if corners: return random.choice(corners)
+    return random.choice(empty)
+
 async def ttt_begin(room, context):
     room.game_data = {"board": [""] * 9, "turn": 0}
     p1, p2 = room.players[0], room.players[1]
@@ -1359,6 +1433,45 @@ async def ttt_begin(room, context):
         f"❌ {uname(p1)} 🆚 ⭕ {uname(p2)}\n"
         f"💰 جایزه: {room.pot()} {CURRENCY_NAME}\n\n"
         f"🎯 نوبت: ❌ {uname(p1)}",
+        ttt_keyboard(room)
+    )
+
+async def ttt_check_end(room, context):
+    """بررسی برد/مساوی — خروجی True یعنی بازی تمام شد"""
+    gd = room.game_data
+    p1, p2 = room.players[0], room.players[1]
+    w = ttt_winner(gd["board"])
+    if w:
+        winner = p1 if w == "❌" else p2
+        loser = p2 if winner == p1 else p1
+        add_coins(winner, room.pot())
+        record_win(winner)
+        record_loss(loser)
+        board_txt = "\n".join("".join(gd["board"][j] if gd["board"][j] else "⬜" for j in range(i, i+3)) for i in range(0, 9, 3))
+        await finish_game(room, context,
+            f"❌⭕ **دوز — پایان**\n━━━━━━━━━━━━━━\n{board_txt}\n\n"
+            f"🏆 برنده: **{uname(winner)}** ({w})\n💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+        return True
+    if all(gd["board"]):
+        for p in room.players:
+            add_coins(p, room.bet)
+        await finish_game(room, context,
+            f"❌⭕ **دوز — پایان**\n━━━━━━━━━━━━━━\n"
+            f"🤝 مساوی شد! شرط هر دو نفر برگشت داده شد.")
+        return True
+    return False
+
+async def ttt_show_turn(room, context):
+    gd = room.game_data
+    p1, p2 = room.players[0], room.players[1]
+    nxt = room.players[gd["turn"]]
+    mark = "❌" if nxt == p1 else "⭕"
+    await edit_room_msg(
+        room, context,
+        f"❌⭕ **دوز**\n━━━━━━━━━━━━━━\n"
+        f"❌ {uname(p1)} 🆚 ⭕ {uname(p2)}\n"
+        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}\n\n"
+        f"🎯 نوبت: {mark} {uname(nxt)}",
         ttt_keyboard(room)
     )
 
@@ -1380,38 +1493,25 @@ async def ttt_action(room, context, query, cell):
     gd["board"][i] = "❌" if uid == p1 else "⭕"
     await query.answer()
     
-    w = ttt_winner(gd["board"])
-    if w:
-        winner = p1 if w == "❌" else p2
-        loser = p2 if winner == p1 else p1
-        add_coins(winner, room.pot())
-        record_win(winner)
-        record_loss(loser)
-        board_txt = "\n".join("".join(gd["board"][j] if gd["board"][j] else "⬜" for j in range(i, i+3)) for i in range(0, 9, 3))
-        await finish_game(room, context,
-            f"❌⭕ **دوز — پایان**\n━━━━━━━━━━━━━━\n{board_txt}\n\n"
-            f"🏆 برنده: **{uname(winner)}** ({w})\n💰 جایزه: {room.pot()} {CURRENCY_NAME}")
-        return
-    
-    if all(gd["board"]):
-        for p in room.players:
-            add_coins(p, room.bet)
-        await finish_game(room, context,
-            f"❌⭕ **دوز — پایان**\n━━━━━━━━━━━━━━\n"
-            f"🤝 مساوی شد! شرط هر دو نفر برگشت داده شد.")
+    if await ttt_check_end(room, context):
         return
     
     gd["turn"] = 1 - gd["turn"]
-    nxt = room.players[gd["turn"]]
-    mark = "❌" if nxt == p1 else "⭕"
-    await edit_room_msg(
-        room, context,
-        f"❌⭕ **دوز**\n━━━━━━━━━━━━━━\n"
-        f"❌ {uname(p1)} 🆚 ⭕ {uname(p2)}\n"
-        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}\n\n"
-        f"🎯 نوبت: {mark} {uname(nxt)}",
-        ttt_keyboard(room)
-    )
+    
+    # 🤖 نوبت خر بات؟
+    if room.players[gd["turn"]] == BOT_ID:
+        my_mark = "❌" if BOT_ID == p1 else "⭕"
+        opp_mark = "⭕" if my_mark == "❌" else "❌"
+        await ttt_show_turn(room, context)
+        await asyncio.sleep(1.2)  # مکث طبیعی
+        if room.finished: return
+        move = ttt_bot_move(gd["board"], my_mark, opp_mark)
+        gd["board"][move] = my_mark
+        if await ttt_check_end(room, context):
+            return
+        gd["turn"] = 1 - gd["turn"]
+    
+    await ttt_show_turn(room, context)
 
 # ------------------------------------------------------------
 # 🪙 شیر یا خط (۲ نفره)
@@ -1588,13 +1688,32 @@ async def bj_begin(room, context):
     hands = {p: [deck.pop(), deck.pop()] for p in room.players}
     dealer = [deck.pop(), deck.pop()]
     room.game_data = {"deck": deck, "hands": hands, "dealer": dealer, "idx": 0, "done": {}}
-    await edit_room_msg(room, context, bj_status_text(room), bj_keyboard(room))
+    await bj_next_turn(room, context)
+
+async def bj_bot_play(room, context):
+    """🤖 خر بات مثل دیلر بازی می‌کنه: زیر ۱۷ کارت می‌گیره"""
+    gd = room.game_data
+    await asyncio.sleep(1.2)
+    if room.finished: return
+    while bj_value(gd["hands"][BOT_ID]) < 17:
+        gd["hands"][BOT_ID].append(gd["deck"].pop())
+    v = bj_value(gd["hands"][BOT_ID])
+    gd["done"][BOT_ID] = "bust" if v > 21 else "stand"
+    gd["idx"] += 1
 
 async def bj_next_turn(room, context):
     gd = room.game_data
-    # پیدا کردن بازیکن بعدی که هنوز تمام نکرده
-    while gd["idx"] < len(room.players) and gd["done"].get(room.players[gd["idx"]]):
-        gd["idx"] += 1
+    while gd["idx"] < len(room.players):
+        current = room.players[gd["idx"]]
+        if gd["done"].get(current):
+            gd["idx"] += 1
+            continue
+        if current == BOT_ID:
+            await edit_room_msg(room, context, bj_status_text(room) + "\n🤖 خر بات داره فکر می‌کنه...", None)
+            await bj_bot_play(room, context)
+            if room.finished: return
+            continue
+        break
     
     if gd["idx"] >= len(room.players):
         await bj_dealer_and_finish(room, context)
@@ -1697,6 +1816,9 @@ async def crash_begin(room, context):
         cp = max(1.1, cp)
     
     room.game_data = {"crash_point": cp, "mult": 1.0, "cashed": {}}
+    # 🤖 خر بات یه هدف مخفی برای برداشت داره
+    if BOT_ID in room.players:
+        room.game_data["bot_target"] = round(random.uniform(1.3, 3.5), 2)
     await edit_room_msg(room, context,
         f"💥 **انفجار**\n━━━━━━━━━━━━━━\n🚀 موشک داره بلند می‌شه...\n📈 ضریب: **x1.00**\n\n⚠️ قبل از انفجار برداشت کن!",
         crash_keyboard(room))
@@ -1713,6 +1835,11 @@ async def crash_loop(room, context):
                 return
             
             gd["mult"] = round(gd["mult"] * random.uniform(1.12, 1.35), 2)
+            
+            # 🤖 برداشت خودکار خر بات وقتی به هدفش برسه
+            if (BOT_ID in room.players and BOT_ID not in gd["cashed"]
+                    and gd["mult"] >= gd.get("bot_target", 999) and gd["mult"] < gd["crash_point"]):
+                gd["cashed"][BOT_ID] = gd["mult"]
             
             if gd["mult"] >= gd["crash_point"] or len(gd["cashed"]) == len(room.players):
                 # 💥 انفجار یا همه برداشت کردند
@@ -1770,6 +1897,9 @@ HILO_NAMES = {"hi": "🔼 بالای ۷", "mid": "🎯 دقیقاً ۷", "lo": "
 
 async def hilo_begin(room, context):
     room.game_data = {"picks": {}}
+    # 🤖 خر بات شانسی انتخاب می‌کنه (بیشتر بالا/پایین چون شانسش بهتره)
+    if BOT_ID in room.players:
+        room.game_data["picks"][BOT_ID] = random.choices(["hi", "lo", "mid"], weights=[42, 42, 16])[0]
     await edit_room_msg(room, context,
         f"🔼🔽 **حدس بالا/پایین**\n━━━━━━━━━━━━━━\n"
         f"🎲 دو تاس ریخته می‌شه. حدس بزن مجموع چی می‌شه:\n\n"
@@ -1964,6 +2094,7 @@ async def start_room_from_text(update, context, game_type, bet):
         parse_mode="Markdown"
     )
     room.message_id = sent_msg.message_id
+    context.application.create_task(room_timeout_watch(room, context))
 
 # ============================================================
 # کادوهای مالک
@@ -1981,13 +2112,235 @@ OWNER_GIFTS = {
 }
 
 # ============================================================
+# 👑 پنل مخصوص اونر
+# ============================================================
+
+def owner_panel_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("👥 دیتابیس بازیکنان", callback_data="panel_players_0")],
+        [InlineKeyboardButton("📊 آمار کلی ربات", callback_data="panel_stats")],
+        [InlineKeyboardButton("💾 بکاپ دیتابیس", callback_data="panel_backup"),
+         InlineKeyboardButton("📥 بازیابی", callback_data="panel_restore_help")],
+        [InlineKeyboardButton("💰 مدیریت سکه", callback_data="panel_cmd_coins"),
+         InlineKeyboardButton("🎁 کادو دادن", callback_data="panel_cmd_gifts")],
+        [InlineKeyboardButton("🚫 بن و آنبن", callback_data="panel_cmd_ban"),
+         InlineKeyboardButton("📖 همه دستورات", callback_data="panel_cmd_all")]
+    ])
+
+def panel_back_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازگشت به پنل", callback_data="panel_main")]])
+
+# 📚 بخش‌های آموزشی پنل اونر
+PANEL_GUIDES = {
+    "panel_cmd_coins": (
+        "💰 **مدیریت سکه — آموزش کامل**\n"
+        "━━━━━━━━━━━━━━\n"
+        "**➕ سکه دادن به یک کاربر:**\n"
+        "1️⃣ برو توی گروه، پیام اون کاربر رو پیدا کن\n"
+        "2️⃣ روی پیامش **ریپلی (Reply)** بزن\n"
+        "3️⃣ بنویس: `+سکه 1000`\n"
+        "✅ همون لحظه ۱۰۰۰ تی‌تاپ بهش اضافه می‌شه\n\n"
+        "**➖ کم کردن سکه از کاربر:**\n"
+        "1️⃣ روی پیامش ریپلی بزن\n"
+        "2️⃣ بنویس: `-سکه 500`\n"
+        "✅ ۵۰۰ تی‌تاپ ازش کم می‌شه (منفی نمی‌شه، حداقل صفر)\n\n"
+        "**💸 انتقال از جیب خودت:**\n"
+        "ریپلی + `انتقال 100` — مثل بقیه کاربرا از موجودی خودت کم می‌شه\n\n"
+        "💡 عدد فارسی هم قبوله: `+سکه ۱۰۰۰`"
+    ),
+    "panel_cmd_gifts": (
+        "🎁 **کادو دادن — آموزش کامل**\n"
+        "━━━━━━━━━━━━━━\n"
+        "کادو یه پیام تبریک خوشگل توی گروه می‌فرسته و ارزشش به سکه اضافه می‌شه — از جیب تو کم نمی‌شه!\n\n"
+        "**روش استفاده:**\n"
+        "1️⃣ روی پیام کاربر **ریپلی** بزن\n"
+        "2️⃣ بنویس: `کادو گل`\n"
+        "✅ پیام تبریک + سکه به حسابش\n\n"
+        "**🎁 لیست کادوها و ارزش‌شون:**\n"
+        "🌹 `کادو گل` — 100\n"
+        "🍫 `کادو شکلات` — 250\n"
+        "🎂 `کادو کیک` — 500\n"
+        "🧸 `کادو خرس` — 1,000\n"
+        "📿 `کادو گردنبند` — 2,500\n"
+        "💎 `کادو الماس` — 5,000\n"
+        "🚗 `کادو ماشین` — 10,000\n"
+        "🏠 `کادو خونه` — 25,000\n\n"
+        "💡 اگه اسم کادو رو اشتباه بنویسی، ربات خودش لیست رو نشونت می‌ده."
+    ),
+    "panel_cmd_ban": (
+        "🚫 **بن و آنبن — آموزش کامل**\n"
+        "━━━━━━━━━━━━━━\n"
+        "کاربر بن‌شده نمی‌تونه از هیچ قابلیت ربات استفاده کنه (بازی، عرعر، جایزه، هیچی!)\n\n"
+        "**🚫 بن کردن:**\n"
+        "1️⃣ روی پیام کاربر خاطی **ریپلی** بزن\n"
+        "2️⃣ بنویس: `بن`\n"
+        "✅ تمام! دیگه ربات جوابش رو نمی‌ده\n\n"
+        "**✅ آنبن کردن:**\n"
+        "1️⃣ روی پیامش ریپلی بزن\n"
+        "2️⃣ بنویس: `انبن`\n"
+        "✅ دوباره می‌تونه بازی کنه\n\n"
+        "💡 لیست بن‌شده‌ها رو می‌تونی از «👥 دیتابیس بازیکنان» ببینی — کنار اسمشون 🚫بن نوشته شده."
+    ),
+    "panel_cmd_all": (
+        "📖 **همه دستورات اونر — یکجا**\n"
+        "━━━━━━━━━━━━━━\n"
+        "**🎛️ پنل و دیتابیس:**\n"
+        "`پنل` — باز کردن همین پنل\n"
+        "`بکاپ` — دریافت فایل بکاپ دیتابیس\n"
+        "ارسال فایل بکاپ با کپشن `بازیابی` — برگردوندن دیتا\n\n"
+        "**👤 مدیریت کاربر (همه با ریپلی):**\n"
+        "`+سکه 1000` — اضافه کردن سکه\n"
+        "`-سکه 500` — کم کردن سکه\n"
+        "`کادو گل` — کادو دادن (۸ نوع کادو)\n"
+        "`بن` — مسدود کردن کاربر\n"
+        "`انبن` — رفع مسدودی\n\n"
+        "**⚠️ نکات مهم:**\n"
+        "• همه این دستورات فقط برای تو کار می‌کنن (OWNER_ID)\n"
+        "• کاربر عادی حتی نمی‌فهمه پنل وجود داره\n"
+        "• دیتابیس توی /tmp هست → بعد از هر ری‌استارت سرور، فایل بکاپ رو با کپشن «بازیابی» بفرست\n"
+        "• هر شب یه `بکاپ` بگیر و توی Saved Messages نگه دار 💾"
+    )
+}
+
+PANEL_PAGE_SIZE = 10
+
+def panel_players_text(page):
+    with closing(db_connect()) as db:
+        total = db.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+        rows = db.execute(
+            "SELECT u.*, d.equipped_hat, d.equipped_saddle, d.equipped_horseshoe, "
+            "d.equipped_tie, d.equipped_clothes, d.equipped_accessory "
+            "FROM users u LEFT JOIN donkeys d ON u.user_id = d.user_id "
+            "ORDER BY u.coins DESC LIMIT ? OFFSET ?",
+            (PANEL_PAGE_SIZE, page * PANEL_PAGE_SIZE)
+        ).fetchall()
+    
+    if not rows:
+        return "❌ بازیکنی در این صفحه نیست.", 0
+    
+    lines = [f"👑 **دیتابیس بازیکنان** (صفحه {page+1})",
+             f"👥 کل بازیکنان: {total}", "━━━━━━━━━━━━━━"]
+    for r in rows:
+        items = []
+        for col, emo in [("equipped_hat","🎩"),("equipped_saddle","🐴"),("equipped_horseshoe","👟"),
+                          ("equipped_tie","👔"),("equipped_clothes","👕"),("equipped_accessory","🎀")]:
+            try:
+                if r[col]: items.append(f"{emo}{r[col]}")
+            except (KeyError, IndexError):
+                pass
+        items_str = " | ".join(items) if items else "—"
+        ban = " 🚫بن" if r["is_banned"] else ""
+        lines.append(
+            f"👤 {esc_md(r['name'])} (`{r['user_id']}`){ban}\n"
+            f"   💰 {r['coins']:,} | ⭐ س{r['level']} | 🏆 {r['wins']}/{r['losses']} | 👶 {r['babies']}\n"
+            f"   🎒 {items_str}"
+        )
+    return "\n".join(lines), total
+
+def panel_players_keyboard(page, total):
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ قبلی", callback_data=f"panel_players_{page-1}"))
+    if (page + 1) * PANEL_PAGE_SIZE < total:
+        nav.append(InlineKeyboardButton("بعدی ➡️", callback_data=f"panel_players_{page+1}"))
+    rows = []
+    if nav: rows.append(nav)
+    rows.append([InlineKeyboardButton("🔙 پنل", callback_data="panel_main")])
+    return InlineKeyboardMarkup(rows)
+
+def export_db_json():
+    """خروجی کامل دیتابیس به JSON برای بکاپ"""
+    with closing(db_connect()) as db:
+        users = [dict(r) for r in db.execute("SELECT * FROM users").fetchall()]
+        donkeys = [dict(r) for r in db.execute("SELECT * FROM donkeys").fetchall()]
+    return {
+        "version": 1,
+        "exported_at": int(time.time()),
+        "users": users,
+        "donkeys": donkeys
+    }
+
+def import_db_json(data):
+    """وارد کردن بکاپ JSON به دیتابیس — کاربران موجود آپدیت می‌شوند"""
+    if not isinstance(data, dict) or "users" not in data:
+        raise ValueError("فرمت بکاپ نامعتبر است")
+    
+    users = data.get("users", [])
+    donkeys = data.get("donkeys", [])
+    
+    user_cols = ["user_id","name","coins","level","wins","losses","is_banned","created_at",
+                 "last_mate","babies","baby_names","last_sound","last_daily",
+                 "last_work","last_wheel","last_rob","last_fortune","sound_count"]
+    donkey_cols = ["user_id","equipped_hat","equipped_saddle","equipped_horseshoe",
+                   "equipped_tie","equipped_clothes","equipped_accessory"]
+    
+    count = 0
+    with closing(db_connect()) as db:
+        for u in users:
+            if "user_id" not in u: continue
+            vals = [u.get(c, 0 if c != "name" and c != "baby_names" else ("کاربر" if c == "name" else "[]")) for c in user_cols]
+            placeholders = ",".join("?" * len(user_cols))
+            db.execute(f"INSERT OR REPLACE INTO users ({','.join(user_cols)}) VALUES ({placeholders})", vals)
+            count += 1
+        for d in donkeys:
+            if "user_id" not in d: continue
+            vals = [d.get(c, "" if c != "user_id" else 0) for c in donkey_cols]
+            placeholders = ",".join("?" * len(donkey_cols))
+            db.execute(f"INSERT OR REPLACE INTO donkeys ({','.join(donkey_cols)}) VALUES ({placeholders})", vals)
+        db.commit()
+    return count
+
+async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """📥 بازیابی بکاپ: اونر فایل JSON بکاپ رو با کپشن «بازیابی» بفرسته"""
+    if not update.message or not update.effective_user:
+        return
+    if update.effective_user.id != OWNER_ID:
+        return
+    
+    caption = (update.message.caption or "").strip()
+    if caption not in ["بازیابی", "restore", "ریستور"]:
+        return
+    
+    doc = update.message.document
+    if not doc:
+        return
+    if doc.file_size and doc.file_size > 20 * 1024 * 1024:
+        await update.message.reply_text("❌ فایل خیلی بزرگه! (حداکثر ۲۰ مگابایت)")
+        return
+    
+    try:
+        tg_file = await doc.get_file()
+        raw = await tg_file.download_as_bytearray()
+        data = json.loads(bytes(raw).decode("utf-8"))
+        count = import_db_json(data)
+        await update.message.reply_text(
+            f"✅ **بازیابی موفق!**\n"
+            f"👥 {count} بازیکن به دیتابیس برگردانده شد.\n"
+            f"🎒 وسایل و مشخصات همه برگشت داده شد.",
+            parse_mode="Markdown"
+        )
+        logger.info(f"✅ بکاپ بازیابی شد: {count} کاربر")
+    except json.JSONDecodeError:
+        await update.message.reply_text("❌ فایل JSON معتبر نیست!")
+    except Exception as e:
+        logger.error(f"❌ خطا در بازیابی: {e}")
+        await update.message.reply_text(f"❌ خطا در بازیابی: {e}")
+
+# ============================================================
 # هندلر پیام‌ها
 # ============================================================
 
 HELP_MAIN_TEXT = (
     "📖 **راهنمای کامل طویله خرستان** 🫏\n"
     "━━━━━━━━━━━━━━\n"
-    "یه بخش رو انتخاب کن تا همه دستوراتش رو ببینی:"
+    "🗣️ همه‌چیز با **دستور فارسی** کار می‌کنه — کافیه تایپ کنی!\n\n"
+    "**⚡ دستورات پرکاربرد:**\n"
+    "🏠 `منو` | 🎮 `بازی‌ها` | 🏪 `فروشگاه`\n"
+    "👤 `پروفایل` | 💰 `سکه` | 🏆 `جدول`\n"
+    "🎁 `روزانه` | 💼 `کار` | 🎡 `گردونه` | 🔮 `فال`\n"
+    "🐴 `خرم` | 🔊 `صداها` | 📖 `راهنما`\n"
+    "🎲 بازی: `انفجار 100` | `اسلات 100` | ...\n\n"
+    "👇 برای توضیح کامل هر بخش، دکمه‌ش رو بزن:"
 )
 
 HELP_SECTIONS = {
@@ -2034,13 +2387,16 @@ HELP_SECTIONS = {
     "help_other": (
         "📋 **بقیه دستورات:**\n"
         "━━━━━━━━━━━━━━\n"
-        "🏠 `منو` — منوی اصلی\n"
-        "🎮 `بازی‌ها` — لیست بازی‌ها\n"
-        "💰 `سکه` — موجودیت\n"
-        "🏆 `جدول` — ثروتمندان طویله\n"
-        "🔊 `صداها` — لیست همه صداهای خر\n"
+        "🏠 `منو` — منوی اصلی با دکمه‌ها\n"
+        "🎮 `بازی‌ها` — لیست بازی‌ها با دکمه‌ها\n"
+        "🏪 `فروشگاه` — خرید وسایل برای خرت\n"
+        "💰 `سکه` — نمایش موجودیت\n"
+        "🏆 `جدول` — ۱۰ نفر ثروتمند طویله + رتبه خودت\n"
+        "🔊 `صداها` — لیست همه صداهای خر و پوینت‌هاشون\n"
         "📖 `راهنما` — همین راهنما\n"
-        "/start — پیام خوش‌آمد"
+        "/start — پیام خوش‌آمد\n\n"
+        "🔒 **نکته:** هر منویی که خودت باز کنی، فقط خودت می‌تونی دکمه‌هاش رو بزنی. "
+        "فقط دکمه‌های وسط بازی (مثل «ورود به بازی») برای همه آزاده!"
     )
 }
 
@@ -2055,14 +2411,27 @@ def help_keyboard():
     ])
 
 OWNER_HELP_TEXT = (
-    "👑 **دستورات مالک** (همه با ریپلی):\n"
+    "👑 **دستورات مالک:**\n"
     "━━━━━━━━━━━━━━\n"
+    "`اونر` یا `پنل` — پنل مدیریت: دیتابیس بازیکنان، آمار، بکاپ 🎛️\n"
+    "`بکاپ` — دریافت فایل بکاپ کامل دیتابیس 💾\n"
+    "ارسال فایل بکاپ با کپشن `بازیابی` — برگرداندن دیتابیس 📥\n\n"
+    "**با ریپلی:**\n"
     "`+سکه 1000` — سکه دادن 💰\n"
     "`-سکه 1000` — کسر سکه 🔥\n"
     "`کادو گل` — کادو دادن 🎁\n"
     "`بن` / `انبن` — بن و آنبن 🚫\n\n"
     "🎁 **کادوها:** گل 🌹(100) | شکلات 🍫(250) | کیک 🎂(500) | خرس 🧸(1000) | گردنبند 📿(2500) | الماس 💎(5000) | ماشین 🚗(10000) | خونه 🏠(25000)"
 )
+
+async def reply_menu(update, text, kb, parse_mode="Markdown"):
+    """ارسال منو و ثبت مالکیتش — فقط بازکننده می‌تونه دکمه‌هاش رو بزنه"""
+    sent = await update.message.reply_text(text, reply_markup=kb, parse_mode=parse_mode)
+    try:
+        register_menu(update.effective_chat.id, sent.message_id, update.effective_user.id)
+    except Exception:
+        pass
+    return sent
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # محافظت در برابر پیام‌های ویرایش‌شده / پست کانال
@@ -2080,7 +2449,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== شروع =====
     if text.startswith("/start"):
-        await update.message.reply_text(
+        await reply_menu(update,
             "🫏✨ **به طویله خرستان خوش آمدید!** ✨🫏\n"
             "━━━━━━━━━━━━━━\n"
             "🎮 ۹ بازی گروهی + اسلات و دوبل\n"
@@ -2092,9 +2461,38 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "🎀 خرت رو خوشتیپ کن و به همه پز بده\n"
             "━━━━━━━━━━━━━━\n"
             "📖 برای دیدن همه دستورات: **راهنما**",
-            reply_markup=main_menu(),
-            parse_mode="Markdown"
+            main_menu()
         )
+        return
+    
+    # ===== 👑 پنل اونر (با کلمه «اونر» یا «پنل») =====
+    if text in ["اونر", "پنل", "panel", "/panel", "owner"]:
+        if user.id != OWNER_ID:
+            return  # کاربر عادی اصلاً متوجه وجود پنل نمی‌شه
+        await reply_menu(update,
+            "👑 **پنل مدیریت طویله**\n━━━━━━━━━━━━━━\nفقط برای اونر! انتخاب کن:",
+            owner_panel_keyboard()
+        )
+        return
+    
+    # ===== 💾 بکاپ متنی سریع =====
+    if text in ["بکاپ", "backup", "/backup"]:
+        if user.id != OWNER_ID:
+            return
+        try:
+            data = export_db_json()
+            payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+            import io
+            f = io.BytesIO(payload)
+            f.name = f"kharbot_backup_{int(time.time())}.json"
+            await update.message.reply_document(
+                document=f,
+                caption=(f"💾 بکاپ کامل دیتابیس\n👥 {len(data['users'])} بازیکن\n\n"
+                         f"📥 برای بازیابی بعد از ری‌استارت: همین فایل رو با کپشن «بازیابی» بفرست.")
+            )
+        except Exception as e:
+            logger.error(f"❌ خطا در بکاپ: {e}")
+            await update.message.reply_text(f"❌ خطا در بکاپ: {e}")
         return
     
     # ===== راهنما =====
@@ -2102,7 +2500,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         msg = HELP_MAIN_TEXT
         if user.id == OWNER_ID:
             msg += "\n\n" + OWNER_HELP_TEXT
-        await update.message.reply_text(msg, reply_markup=help_keyboard(), parse_mode="Markdown")
+        await reply_menu(update, msg, help_keyboard())
         return
     
     # ===== لیست صداها =====
@@ -2150,30 +2548,24 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== منو =====
     if text in ["منو", "menu", "خانه"]:
-        await update.message.reply_text(
-            "🏠 **منوی اصلی طویله**",
-            reply_markup=main_menu(),
-            parse_mode="Markdown"
-        )
+        await reply_menu(update, "🏠 **منوی اصلی طویله**", main_menu())
         return
     
     # ===== لیست بازی‌ها =====
     if text in ["بازی", "بازی‌ها", "بازیها", "games"]:
-        await update.message.reply_text(
+        await reply_menu(update,
             "🎮 **انتخاب بازی:**\n\n"
             "می‌تونی مستقیم تایپ کنی: `انفجار 100`\n"
             "یا از دکمه‌ها انتخاب کنی:",
-            reply_markup=games_menu(),
-            parse_mode="Markdown"
+            games_menu()
         )
         return
     
     # ===== فروشگاه =====
     if text in ["فروشگاه", "شاپ", "shop"]:
-        await update.message.reply_text(
+        await reply_menu(update,
             "🏪 **فروشگاه طویله**\nانتخاب کنید:",
-            reply_markup=shop_keyboard(),
-            parse_mode="Markdown"
+            shop_keyboard()
         )
         return
     
@@ -2381,6 +2773,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown"
             )
             room.message_id = sent_msg.message_id
+            context.application.create_task(room_timeout_watch(room, context))
             
             context.user_data["awaiting_bet"] = False
             context.user_data["temp_game"] = None
@@ -2408,6 +2801,114 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== اکشن‌های داخل بازی (جواب query داخل خود اکشن داده می‌شود) =====
     if data.startswith("g|"):
         await game_action_router(update, context, query, data)
+        return
+    
+    # ===== 🔒 قفل منو: هر منویی فقط برای کسی که بازش کرده =====
+    # دکمه‌های اتاق بازی (ورود، خر بات، شروع، لغو) برای همه آزادن
+    if not data.startswith("room_"):
+        try:
+            owner = menu_owner_of(query.message.chat_id, query.message.message_id)
+        except Exception:
+            owner = None
+        if owner is not None and owner != user.id:
+            await query.answer("🔒 این منو مال تو نیست! خودت یکی باز کن 😉", show_alert=True)
+            return
+    
+    # ===== 👑 پنل اونر (فقط اونر) =====
+    if data.startswith("panel_"):
+        if user.id != OWNER_ID:
+            await query.answer("⛔ دسترسی نداری!", show_alert=True)
+            return
+        await query.answer()
+        
+        if data == "panel_main":
+            await query.edit_message_text(
+                "👑 **پنل مدیریت طویله**\n━━━━━━━━━━━━━━\nفقط برای اونر! انتخاب کن:",
+                reply_markup=owner_panel_keyboard(),
+                parse_mode="Markdown"
+            )
+            return
+        
+        # 📚 بخش‌های آموزشی دستورات
+        if data in PANEL_GUIDES:
+            await query.edit_message_text(
+                PANEL_GUIDES[data],
+                reply_markup=panel_back_kb(),
+                parse_mode="Markdown"
+            )
+            return
+        
+        if data.startswith("panel_players_"):
+            page = int(data[14:])
+            text_p, total = panel_players_text(page)
+            await query.edit_message_text(
+                text_p,
+                reply_markup=panel_players_keyboard(page, total),
+                parse_mode="Markdown"
+            )
+            return
+        
+        if data == "panel_stats":
+            with closing(db_connect()) as db:
+                s = db.execute(
+                    "SELECT COUNT(*) as users, COALESCE(SUM(coins),0) as coins, "
+                    "COALESCE(SUM(wins),0) as wins, COALESCE(SUM(losses),0) as losses, "
+                    "COALESCE(SUM(babies),0) as babies, COALESCE(SUM(sound_count),0) as sounds, "
+                    "COALESCE(SUM(is_banned),0) as banned FROM users"
+                ).fetchone()
+                rich = db.execute("SELECT name, coins FROM users ORDER BY coins DESC LIMIT 1").fetchone()
+            msg = (
+                f"📊 **آمار کلی ربات**\n━━━━━━━━━━━━━━\n"
+                f"👥 کل بازیکنان: {s['users']}\n"
+                f"💰 کل {CURRENCY_NAME} در گردش: {s['coins']:,}\n"
+                f"🎮 کل بردها: {s['wins']:,} | باخت‌ها: {s['losses']:,}\n"
+                f"👶 کل کره‌خرها: {s['babies']}\n"
+                f"🔊 کل عرعرها: {s['sounds']:,}\n"
+                f"🚫 بن‌شده‌ها: {s['banned']}\n"
+                f"🎪 اتاق‌های فعال: {len(ACTIVE_ROOMS)}\n"
+            )
+            if rich:
+                msg += f"🥇 ثروتمندترین: {esc_md(rich['name'])} ({rich['coins']:,})"
+            await query.edit_message_text(
+                msg,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 پنل", callback_data="panel_main")]]),
+                parse_mode="Markdown"
+            )
+            return
+        
+        if data == "panel_backup":
+            try:
+                bdata = export_db_json()
+                payload = json.dumps(bdata, ensure_ascii=False).encode("utf-8")
+                import io
+                f = io.BytesIO(payload)
+                f.name = f"kharbot_backup_{int(time.time())}.json"
+                await context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=f,
+                    caption=(f"💾 بکاپ کامل دیتابیس\n👥 {len(bdata['users'])} بازیکن\n\n"
+                             f"📥 برای بازیابی بعد از ری‌استارت: همین فایل رو با کپشن «بازیابی» بفرست.")
+                )
+                await query.answer("✅ بکاپ ارسال شد!")
+            except Exception as e:
+                logger.error(f"❌ خطا در بکاپ: {e}")
+                await query.answer(f"❌ خطا: {e}", show_alert=True)
+            return
+        
+        if data == "panel_restore_help":
+            await query.edit_message_text(
+                "📥 **راهنمای بازیابی دیتابیس**\n━━━━━━━━━━━━━━\n"
+                "چون دیتابیس توی `/tmp` هست، بعد از هر ری‌استارت سرور پاک می‌شه.\n\n"
+                "**روش کار:**\n"
+                "1️⃣ هر چند وقت یه بار بنویس `بکاپ` یا از پنل دکمه «💾 بکاپ» رو بزن\n"
+                "2️⃣ ربات یه فایل JSON بهت می‌ده — نگهش دار\n"
+                "3️⃣ بعد از ری‌استارت، همون فایل رو برای ربات بفرست با **کپشن**: `بازیابی`\n"
+                "4️⃣ تمام! سکه‌ها، وسایل، سطح و همه‌چیزِ همه برمی‌گرده ✅\n\n"
+                "⚠️ فقط اونر می‌تونه بازیابی کنه.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 پنل", callback_data="panel_main")]]),
+                parse_mode="Markdown"
+            )
+            return
         return
     
     await query.answer()
@@ -2511,6 +3012,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_room_status(room, context, query)
         
         # بازی‌های دقیقاً ۲ نفره: با پر شدن ظرفیت، خودکار شروع شود
+        if room.game_type in TWO_PLAYER_GAMES and len(room.players) == 2:
+            await start_game(room, context, query)
+        return
+    
+    # ===== اضافه کردن خر بات =====
+    if data.startswith("room_bot_"):
+        room_id = data[9:]
+        room = get_room(room_id)
+        if not room:
+            await query.answer("❌ اتاق وجود ندارد!", show_alert=True)
+            return
+        if room.started:
+            await query.answer("❌ بازی شروع شده!", show_alert=True)
+            return
+        if room.creator_id != user.id:
+            await query.answer("❌ فقط سازنده اتاق می‌تونه خر بات رو دعوت کنه!", show_alert=True)
+            return
+        if BOT_ID in room.players:
+            await query.answer("🤖 خر بات از قبل توی بازیه!", show_alert=True)
+            return
+        if len(room.players) >= room.max_players:
+            await query.answer("❌ ظرفیت پر است!", show_alert=True)
+            return
+        
+        room.add_player(BOT_ID)
+        await query.answer("🤖 خر بات وارد شد! عر عر! 🐴")
+        await show_room_status(room, context, query)
+        
+        # بازی‌های ۲ نفره: با ورود خر بات خودکار شروع شود
         if room.game_type in TWO_PLAYER_GAMES and len(room.players) == 2:
             await start_game(room, context, query)
         return
@@ -2699,6 +3229,7 @@ def main():
     
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT, message_handler))
+    app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(error_handler)
     
