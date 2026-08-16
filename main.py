@@ -35,8 +35,8 @@ CURRENCY_NAME = "تی‌تاپ"
 BOT_ID = -777
 BOT_NAME = "🤖 خر بات"
 
-# ⏰ اگر بازی تا این مدت شروع نشد، خودکار لغو می‌شود
-ROOM_START_TIMEOUT = 120
+# ⏰ اگر بازی تا این مدت شروع نشد، خودکار لغو می‌شود (۵ دقیقه)
+ROOM_START_TIMEOUT = 300
 
 logging.basicConfig(format="%(asctime)s | %(levelname)s | %(message)s", level=logging.INFO)
 logger = logging.getLogger("KHARBOT")
@@ -92,6 +92,13 @@ def init_db():
                 equipped_clothes TEXT DEFAULT '',
                 equipped_accessory TEXT DEFAULT '',
                 FOREIGN KEY(user_id) REFERENCES users(user_id))""")
+            
+            # 💬 چت‌ها (گروه‌ها و پی‌وی‌ها) برای پیام همگانی
+            db.execute("""CREATE TABLE IF NOT EXISTS chats (
+                chat_id INTEGER PRIMARY KEY,
+                chat_type TEXT DEFAULT '',
+                title TEXT DEFAULT '',
+                last_seen INTEGER DEFAULT 0)""")
             db.commit()
             # مهاجرت: ستون‌های جدید (اگر دیتابیس قدیمی باشد)
             existing = {r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()}
@@ -107,6 +114,20 @@ def init_db():
 # ============================================================
 # مدیریت کاربران
 # ============================================================
+
+def track_chat(chat):
+    """ثبت گروه/پی‌وی برای پیام همگانی"""
+    if not chat:
+        return
+    try:
+        with closing(db_connect()) as db:
+            db.execute(
+                "INSERT OR REPLACE INTO chats (chat_id, chat_type, title, last_seen) VALUES (?, ?, ?, ?)",
+                (chat.id, chat.type or "", (getattr(chat, "title", "") or getattr(chat, "first_name", "") or "")[:100], int(time.time()))
+            )
+            db.commit()
+    except Exception as e:
+        logger.warning(f"⚠️ خطا در ثبت چت: {e}")
 
 def ensure_user(user_id, name="کاربر"):
     now = int(time.time())
@@ -769,13 +790,83 @@ MATE_COST = 500
 MAX_BABIES = 5
 MATE_COOLDOWN = 86400
 
+# درخواست‌های جفت‌گیری در انتظار جواب: {(chat_id, msg_id): {"from": id, "to": id, "time": ts}}
+MATE_PROPOSALS = {}
+MATE_PROPOSAL_TTL = 300  # درخواست بعد از ۵ دقیقه منقضی می‌شود
+
+def mate_check(user_id, user_name, target_id, target_name):
+    """بررسی همه شرایط جفت‌گیری — خروجی: (پیام خطا یا None)"""
+    u1 = get_user(user_id)
+    u2 = get_user(target_id)
+    
+    if u1["level"] < 2:
+        return f"❌ {esc_md(user_name)} عزیز، سطح تو {u1['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسی! 🐣"
+    if u2["level"] < 2:
+        return f"❌ {esc_md(target_name)} عزیز، سطحش {u2['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسه! 🐣"
+    if u1["coins"] < MATE_COST:
+        return f"❌ {esc_md(user_name)} {MATE_COST} {CURRENCY_NAME} نداری! 💸"
+    if u2["coins"] < MATE_COST:
+        return f"❌ {esc_md(target_name)} {MATE_COST} {CURRENCY_NAME} نداره! 💸"
+    
+    babies1 = json.loads(u1["baby_names"]) if u1["baby_names"] else []
+    babies2 = json.loads(u2["baby_names"]) if u2["baby_names"] else []
+    if len(babies1) >= MAX_BABIES:
+        return f"❌ {esc_md(user_name)} دیگه جا برای کره‌خر جدید نداری! (حداکثر {MAX_BABIES})"
+    if len(babies2) >= MAX_BABIES:
+        return f"❌ {esc_md(target_name)} دیگه جا برای کره‌خر جدید نداره! (حداکثر {MAX_BABIES})"
+    
+    now = int(time.time())
+    if now - u1["last_mate"] < MATE_COOLDOWN:
+        remaining = (MATE_COOLDOWN - (now - u1["last_mate"])) // 3600
+        return f"⏳ {esc_md(user_name)} عزیز، {remaining} ساعت دیگه می‌تونی جفت‌گیری کنی!"
+    if now - u2["last_mate"] < MATE_COOLDOWN:
+        remaining = (MATE_COOLDOWN - (now - u2["last_mate"])) // 3600
+        return f"⏳ {esc_md(target_name)} عزیز، {remaining} ساعت دیگه می‌تونه جفت‌گیری کنه!"
+    return None
+
+def mate_do(user_id, target_id):
+    """انجام جفت‌گیری بعد از قبول — خروجی: متن نتیجه"""
+    u1 = get_user(user_id)
+    u2 = get_user(target_id)
+    now = int(time.time())
+    
+    remove_coins(user_id, MATE_COST)
+    remove_coins(target_id, MATE_COST)
+    
+    baby_names = ["🐣 کره‌خر کوچولو", "🐣 کره‌خر نازنین", "🐣 کره‌خر خوشگل", "🐣 کره‌خر بازیگوش", "🐣 کره‌خر شیطون"]
+    baby_name = random.choice(baby_names)
+    
+    babies1 = json.loads(u1["baby_names"]) if u1["baby_names"] else []
+    babies2 = json.loads(u2["baby_names"]) if u2["baby_names"] else []
+    babies1.append(baby_name)
+    babies2.append(baby_name)
+    
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET baby_names = ?, babies = babies + 1, last_mate = ? WHERE user_id = ?",
+                  (json.dumps(babies1), now, user_id))
+        db.execute("UPDATE users SET baby_names = ?, babies = babies + 1, last_mate = ? WHERE user_id = ?",
+                  (json.dumps(babies2), now, target_id))
+        db.commit()
+    
+    return (
+        f"🎉 **تبریک! جفت‌گیری موفق!**\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"👫 {uname(user_id)} ❤️ {uname(target_id)}\n\n"
+        f"🐣 **کره‌خر متولد شد:** {baby_name}\n"
+        f"👶 تعداد کره‌خرهای {uname(user_id)}: {len(babies1)}\n"
+        f"👶 تعداد کره‌خرهای {uname(target_id)}: {len(babies2)}\n\n"
+        f"💸 هزینه: {MATE_COST} {CURRENCY_NAME} از هر نفر"
+    )
+
 async def mate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """درخواست جفت‌گیری — باید طرف مقابل قبول کنه ❤️"""
     user = update.effective_user
     ensure_user(user.id, user.first_name)
     
     if not update.message.reply_to_message:
         await update.message.reply_text(
-            "❌ روی پیام شخص مورد نظر **ریپلی (Reply)** بزن و سپس `جفت‌گیری` رو تایپ کن."
+            "❌ روی پیام شخص مورد نظر **ریپلی (Reply)** بزن و بنویس `جفت‌گیری`.",
+            parse_mode="Markdown"
         )
         return
     
@@ -785,72 +876,96 @@ async def mate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id == target_id:
         await update.message.reply_text("❌ نمی‌تونی با خودت جفت‌گیری کنی! 😂")
         return
+    if target.is_bot:
+        await update.message.reply_text("❌ با ربات نمی‌شه جفت‌گیری کرد! 🤖😂")
+        return
     
     ensure_user(target_id, target.first_name)
-    u1 = get_user(user.id)
-    u2 = get_user(target_id)
     
-    if u1["level"] < 2:
-        await update.message.reply_text(f"❌ {esc_md(user.first_name)} عزیز، سطح تو {u1['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسی! 🐣", parse_mode="Markdown")
+    # بررسی شرایط قبل از فرستادن درخواست
+    err = mate_check(user.id, user.first_name, target_id, target.first_name)
+    if err:
+        await update.message.reply_text(err, parse_mode="Markdown")
         return
     
-    if u2["level"] < 2:
-        await update.message.reply_text(f"❌ {esc_md(target.first_name)} عزیز، سطحش {u2['level']} است.\nبرای جفت‌گیری باید به **سطح ۲** برسه! 🐣", parse_mode="Markdown")
-        return
-    
-    if u1["coins"] < MATE_COST:
-        await update.message.reply_text(f"❌ {esc_md(user.first_name)} {MATE_COST} {CURRENCY_NAME} نداری! 💸")
-        return
-    if u2["coins"] < MATE_COST:
-        await update.message.reply_text(f"❌ {esc_md(target.first_name)} {MATE_COST} {CURRENCY_NAME} نداره! 💸")
-        return
-    
-    babies1 = json.loads(u1["baby_names"]) if u1["baby_names"] else []
-    babies2 = json.loads(u2["baby_names"]) if u2["baby_names"] else []
-    
-    if len(babies1) >= MAX_BABIES:
-        await update.message.reply_text(f"❌ {esc_md(user.first_name)} دیگه جا برای کره‌خر جدید نداری! (حداکثر {MAX_BABIES})")
-        return
-    if len(babies2) >= MAX_BABIES:
-        await update.message.reply_text(f"❌ {esc_md(target.first_name)} دیگه جا برای کره‌خر جدید نداره! (حداکثر {MAX_BABIES})")
-        return
-    
-    now = int(time.time())
-    if now - u1["last_mate"] < MATE_COOLDOWN:
-        remaining = (MATE_COOLDOWN - (now - u1["last_mate"])) // 3600
-        await update.message.reply_text(f"⏳ {esc_md(user.first_name)} عزیز، {remaining} ساعت دیگه می‌تونی جفت‌گیری کنی!")
-        return
-    if now - u2["last_mate"] < MATE_COOLDOWN:
-        remaining = (MATE_COOLDOWN - (now - u2["last_mate"])) // 3600
-        await update.message.reply_text(f"⏳ {esc_md(target.first_name)} عزیز، {remaining} ساعت دیگه می‌تونه جفت‌گیری کنه!")
-        return
-    
-    remove_coins(user.id, MATE_COST)
-    remove_coins(target_id, MATE_COST)
-    
-    baby_names = ["🐣 کره‌خر کوچولو", "🐣 کره‌خر نازنین", "🐣 کره‌خر خوشگل", "🐣 کره‌خر بازیگوش", "🐣 کره‌خر شیطون"]
-    baby_name = random.choice(baby_names)
-    
-    babies1.append(baby_name)
-    babies2.append(baby_name)
-    
-    with closing(db_connect()) as db:
-        db.execute("UPDATE users SET baby_names = ?, babies = babies + 1, last_mate = ? WHERE user_id = ?",
-                  (json.dumps(babies1), now, user.id))
-        db.execute("UPDATE users SET baby_names = ?, babies = babies + 1, last_mate = ? WHERE user_id = ?",
-                  (json.dumps(babies2), now, target_id))
-        db.commit()
-    
-    await update.message.reply_text(
-        f"🎉 **تبریک! جفت‌گیری موفق!**\n"
-        f"━━━━━━━━━━━━━━━━\n"
-        f"👫 {esc_md(user.first_name)} ❤️ {esc_md(target.first_name)}\n\n"
-        f"🐣 **کره‌خر متولد شد:** {baby_name}\n"
-        f"👶 تعداد کره‌خرهای {esc_md(user.first_name)}: {len(babies1)}\n"
-        f"👶 تعداد کره‌خرهای {esc_md(target.first_name)}: {len(babies2)}\n\n"
-        f"💸 هزینه: {MATE_COST} {CURRENCY_NAME} از هر نفر",
+    # 💌 ارسال درخواست با دکمه قبول/رد — فقط طرف مقابل می‌تونه جواب بده
+    sent = await update.message.reply_text(
+        f"💌 **درخواست جفت‌گیری!**\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"🐴 {esc_md(user.first_name)} می‌خواد با {esc_md(target.first_name)} جفت‌گیری کنه!\n\n"
+        f"💸 هزینه: {MATE_COST} {CURRENCY_NAME} از هر نفر\n"
+        f"🐣 نتیجه: یک کره‌خر برای هر دو!\n\n"
+        f"❓ {esc_md(target.first_name)} عزیز، نظرت چیه؟\n"
+        f"⏳ (۵ دقیقه فرصت داری جواب بدی)",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("💚 قبوله!", callback_data="mate_yes"),
+            InlineKeyboardButton("💔 نه ممنون", callback_data="mate_no")
+        ]]),
         parse_mode="Markdown"
     )
+    
+    # پاکسازی درخواست‌های منقضی‌شده
+    now = time.time()
+    for k in list(MATE_PROPOSALS.keys()):
+        if now - MATE_PROPOSALS[k]["time"] > MATE_PROPOSAL_TTL:
+            MATE_PROPOSALS.pop(k, None)
+    
+    MATE_PROPOSALS[(update.effective_chat.id, sent.message_id)] = {
+        "from": user.id, "to": target_id, "time": now
+    }
+
+async def mate_callback(update, context, query, answer):
+    """جواب درخواست جفت‌گیری — فقط کسی که ازش خواستگاری شده"""
+    key = (query.message.chat_id, query.message.message_id)
+    prop = MATE_PROPOSALS.get(key)
+    
+    if not prop:
+        await query.answer("❌ این درخواست منقضی شده!", show_alert=True)
+        try:
+            await query.edit_message_text("⌛ این درخواست جفت‌گیری منقضی شده.")
+        except Exception:
+            pass
+        return
+    
+    uid = query.from_user.id
+    if uid != prop["to"]:
+        if uid == prop["from"]:
+            await query.answer("😅 صبر کن، طرف مقابل باید جواب بده!", show_alert=True)
+        else:
+            await query.answer("🔒 این درخواست مال تو نیست!", show_alert=True)
+        return
+    
+    if time.time() - prop["time"] > MATE_PROPOSAL_TTL:
+        MATE_PROPOSALS.pop(key, None)
+        await query.answer("⌛ درخواست منقضی شده!", show_alert=True)
+        await query.edit_message_text("⌛ این درخواست جفت‌گیری منقضی شده.")
+        return
+    
+    MATE_PROPOSALS.pop(key, None)
+    
+    if answer == "no":
+        await query.answer("💔 رد شد!")
+        await query.edit_message_text(
+            f"💔 **درخواست رد شد!**\n"
+            f"{uname(prop['to'])} به {uname(prop['from'])} جواب منفی داد! 😢\n"
+            f"🐴 غم آخرت باشه رفیق...",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # ✅ قبول — دوباره شرایط چک بشه (شاید توی این فاصله پولش رو خرج کرده!)
+    u_from = get_user(prop["from"])
+    u_to = get_user(prop["to"])
+    err = mate_check(prop["from"], u_from["name"] if u_from else "کاربر",
+                     prop["to"], u_to["name"] if u_to else "کاربر")
+    if err:
+        await query.answer("❌ شرایط تغییر کرده!", show_alert=True)
+        await query.edit_message_text(f"❌ جفت‌گیری انجام نشد:\n{err}", parse_mode="Markdown")
+        return
+    
+    await query.answer("💚 قبول شد! 🎉")
+    result = mate_do(prop["from"], prop["to"])
+    await query.edit_message_text(result, parse_mode="Markdown")
 
 # ============================================================
 # نام بازی‌ها
@@ -987,6 +1102,12 @@ def cleanup_room(room_id: str):
         for p in room.players:
             if PLAYER_IN_GAME.get(p) == room_id:
                 PLAYER_IN_GAME.pop(p, None)
+        # پاکسازی صف انتظار تاس این چت
+        try:
+            if DICE_WAITING.get(room.chat_id) == room_id:
+                DICE_WAITING.pop(room.chat_id, None)
+        except NameError:
+            pass
 
 def create_room(chat_id: int, game_type: str, creator_id: int, bet: int) -> GameRoom:
     global _ROOM_COUNTER
@@ -1299,9 +1420,9 @@ async def start_game(room: GameRoom, context: ContextTypes.DEFAULT_TYPE, query):
     elif gt == "coinflip":
         await coinflip_run(room, context)
     elif gt == "dice":
-        await dice_run(room, context)
+        await dice_begin(room, context)
     elif gt == "roulette":
-        await roulette_run(room, context)
+        await roulette_begin(room, context)
     elif gt == "poker":
         await poker_run(room, context)
     elif gt == "blackjack":
@@ -1539,22 +1660,69 @@ async def coinflip_run(room, context):
 # 🎲 تاس (۲ تا ۱۰ نفره)
 # ------------------------------------------------------------
 
-async def dice_run(room, context):
-    await edit_room_msg(room, context, "🎲 همه تاس می‌ریزند... 🌀")
-    await asyncio.sleep(2)
-    
-    rolls = {}
+# نگاشت اتاق‌های تاس منتظر پرتاب: {chat_id: room_id}
+DICE_WAITING = {}
+
+def dice_status_text(room):
+    gd = room.game_data
+    lines = ["🎲 **بازی تاس — هر کی خودش می‌ندازه!**", "━━━━━━━━━━━━━━",
+             f"💰 جایزه: {room.pot()} {CURRENCY_NAME}", ""]
     for p in room.players:
-        rolls[p] = (random.randint(1, 6), random.randint(1, 6))
+        if p in gd["rolls"]:
+            lines.append(f"✅ {uname(p)}: انداخت → **{gd['rolls'][p]}**")
+        else:
+            lines.append(f"⏳ {uname(p)}: منتظر پرتاب...")
+    lines.append("\n👆 ایموجی 🎲 رو از پنل ایموجی‌ها بفرست تا تاست ثبت بشه!")
+    lines.append("⏰ ۲ دقیقه وقت دارید — نندازی، بدون تاس حساب می‌شی (صفر)!")
+    return "\n".join(lines)
+
+async def dice_begin(room, context):
+    """شروع بازی تاس: هر بازیکن خودش ایموجی 🎲 می‌فرسته و تلگرام عددش رو می‌ده"""
+    room.game_data = {"rolls": {}, "deadline": time.time() + 120}
+    # 🤖 خر بات همون اول تاسش رو می‌ندازه (تاس مجازی)
+    if BOT_ID in room.players:
+        room.game_data["rolls"][BOT_ID] = random.randint(1, 6)
+    DICE_WAITING[room.chat_id] = room.room_id
+    await edit_room_msg(room, context, dice_status_text(room))
+    context.application.create_task(dice_deadline_watch(room, context))
+
+async def dice_deadline_watch(room, context):
+    """⏰ بعد از ۲ دقیقه، هر کی ننداخته صفر حساب می‌شه و نتیجه اعلام می‌شه"""
+    try:
+        await asyncio.sleep(120)
+        if ACTIVE_ROOMS.get(room.room_id) is not room or room.finished:
+            return
+        await dice_finish(room, context)
+    except Exception as e:
+        logger.warning(f"⚠️ خطا در تایمر تاس: {e}")
+
+async def dice_finish(room, context):
+    gd = room.game_data
+    if DICE_WAITING.get(room.chat_id) == room.room_id:
+        DICE_WAITING.pop(room.chat_id, None)
     
-    best = max(sum(r) for r in rolls.values())
-    winners = [p for p, r in rolls.items() if sum(r) == best]
+    rolls = gd["rolls"]
+    # هر کی ننداخته → صفر
+    for p in room.players:
+        rolls.setdefault(p, 0)
     
-    dice_emoji = ["", "⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]
+    best = max(rolls.values())
+    if best == 0:
+        # هیچ‌کس ننداخت! شرط‌ها برگرده
+        for p in room.players:
+            add_coins(p, room.bet)
+        await finish_game(room, context,
+            "🎲 **تاس — لغو شد!**\n━━━━━━━━━━━━━━\n"
+            "😴 هیچ‌کس تاس ننداخت! شرط همه برگشت داده شد.")
+        return
+    
+    winners = [p for p, v in rolls.items() if v == best]
+    dice_emoji = ["💤", "⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]
     lines = []
-    for p, (d1, d2) in sorted(rolls.items(), key=lambda x: -sum(x[1])):
+    for p, v in sorted(rolls.items(), key=lambda x: -x[1]):
         mark = "🏆" if p in winners else "▫️"
-        lines.append(f"{mark} {uname(p)}: {dice_emoji[d1]}{dice_emoji[d2]} = **{d1+d2}**")
+        val = f"{dice_emoji[v]} = **{v}**" if v > 0 else "💤 ننداخت (صفر)"
+        lines.append(f"{mark} {uname(p)}: {val}")
     
     share = room.pot() // len(winners)
     for w in winners:
@@ -1569,54 +1737,169 @@ async def dice_run(room, context):
         f"🎲 **تاس — نتیجه**\n━━━━━━━━━━━━━━\n" + "\n".join(lines) +
         f"\n\n🏆 برنده: **{win_names}**\n💰 جایزه هر نفر: {share} {CURRENCY_NAME}")
 
+async def dice_roll_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """🎲 وقتی کسی توی گروه ایموجی تاس می‌فرسته — عددش از تلگرام خونده می‌شه"""
+    msg = update.message
+    if not msg or not msg.dice or not update.effective_user:
+        return
+    # فقط تاس واقعی 🎲 (نه دارت و بولینگ)
+    if msg.dice.emoji != "🎲":
+        return
+    # فوروارد قبول نیست! (تقلب)
+    if getattr(msg, "forward_origin", None) or getattr(msg, "forward_date", None):
+        return
+    
+    chat_id = update.effective_chat.id
+    room_id = DICE_WAITING.get(chat_id)
+    if not room_id:
+        return
+    room = ACTIVE_ROOMS.get(room_id)
+    if not room or room.finished or room.game_type != "dice":
+        DICE_WAITING.pop(chat_id, None)
+        return
+    
+    uid = update.effective_user.id
+    gd = room.game_data
+    if uid not in room.players:
+        return  # تماشاچی تاس انداخته، مهم نیست
+    if uid in gd["rolls"]:
+        try:
+            await msg.reply_text("😅 تاست رو قبلاً انداختی! همون اولی حسابه.")
+        except Exception:
+            pass
+        return
+    
+    # 🎲 عدد واقعی تاس تلگرام
+    gd["rolls"][uid] = msg.dice.value
+    
+    # همه انداختن؟ → نتیجه (کمی صبر تا انیمیشن تاس تموم شه)
+    if len(gd["rolls"]) == len(room.players):
+        await asyncio.sleep(3.5)
+        if not room.finished:
+            await dice_finish(room, context)
+    else:
+        await edit_room_msg(room, context, dice_status_text(room))
+
+async def dice_run(room, context):
+    """(نسخه قدیمی خودکار — دیگه استفاده نمی‌شه ولی برای سازگاری مونده)"""
+    await dice_begin(room, context)
+
 # ------------------------------------------------------------
 # 🔫 رولت روسی (۲ تا ۱۰ نفره)
 # ------------------------------------------------------------
 
-async def roulette_run(room, context):
+def roulette_keyboard(room):
+    """دکمه انتخاب هدف: همه زنده‌ها به جز خود شلیک‌کننده"""
+    gd = room.game_data
+    shooter = gd["alive"][gd["turn"]]
+    buttons = []
+    row = []
+    for p in gd["alive"]:
+        if p == shooter:
+            continue
+        row.append(InlineKeyboardButton(f"🎯 {uname(p)}", callback_data=gcb(room.room_id, f"rr_{p}")))
+        if len(row) == 2:
+            buttons.append(row); row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(buttons)
+
+def roulette_status(room, extra=""):
+    gd = room.game_data
+    shooter = gd["alive"][gd["turn"]]
+    alive_names = "، ".join(uname(p) for p in gd["alive"])
+    return (
+        f"🔫 **رولت روسی — راند {gd['round']}**\n━━━━━━━━━━━━━━\n"
+        f"❤️ زنده‌ها ({len(gd['alive'])}): {alive_names}\n"
+        f"{extra}"
+        f"\n🎯 نوبت شلیک: **{uname(shooter)}**\n"
+        f"هفت‌تیر دستشه... به کی شلیک می‌کنه؟ 😰"
+    )
+
+async def roulette_begin(room, context):
     alive = room.players[:]
     random.shuffle(alive)
-    round_no = 0
+    room.game_data = {"alive": alive, "turn": 0, "round": 1}
+    await edit_room_msg(room, context, roulette_status(room), roulette_keyboard(room))
+    await roulette_bot_turn(room, context)
+
+async def roulette_next_round(room, context, extra):
+    """پایان راند: یک نفر حذف شد → راند جدید یا پایان بازی"""
+    gd = room.game_data
+    if len(gd["alive"]) == 1:
+        winner = gd["alive"][0]
+        add_coins(winner, room.pot())
+        record_win(winner)
+        for p in room.players:
+            if p != winner:
+                record_loss(p)
+        await finish_game(room, context,
+            f"🔫 **رولت روسی — پایان**\n━━━━━━━━━━━━━━\n"
+            f"{extra}\n"
+            f"🏆 آخرین بازمانده: **{uname(winner)}**\n"
+            f"💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+        return True
+    gd["round"] += 1
+    gd["turn"] = gd["turn"] % len(gd["alive"])
+    await edit_room_msg(room, context, roulette_status(room, extra + "\n"), roulette_keyboard(room))
+    await roulette_bot_turn(room, context)
+    return False
+
+async def roulette_shoot(room, context, shooter, target):
+    """شلیک: ۲ از ۶ احتمال گلوله. حذف = پایان راند"""
+    gd = room.game_data
+    await edit_room_msg(room, context,
+        f"🔫 **رولت روسی — راند {gd['round']}**\n━━━━━━━━━━━━━━\n"
+        f"😰 {uname(shooter)} هفت‌تیر رو گرفت سمت {uname(target)}...\n"
+        f"🌀 چرخش استوانه...")
+    await asyncio.sleep(2)
+    if room.finished: return
     
-    while len(alive) > 1:
-        round_no += 1
-        victim = random.choice(alive)
-        await edit_room_msg(
-            room, context,
-            f"🔫 **رولت روسی — دور {round_no}**\n━━━━━━━━━━━━━━\n"
-            f"👥 زنده‌ها: {len(alive)}\n"
-            f"😰 {uname(victim)} هفت‌تیر رو گرفت روی شقیقه‌اش...\n\n🌀 چرخش استوانه..."
-        )
-        await asyncio.sleep(2)
-        
-        if random.randint(1, 6) <= 2:  # شانس شلیک
-            alive.remove(victim)
-            await edit_room_msg(
-                room, context,
-                f"🔫 **رولت روسی — دور {round_no}**\n━━━━━━━━━━━━━━\n"
-                f"💥 **بنگ!** {uname(victim)} حذف شد! ☠️\n"
-                f"👥 باقی‌مانده: {len(alive)} نفر"
-            )
-        else:
-            await edit_room_msg(
-                room, context,
-                f"🔫 **رولت روسی — دور {round_no}**\n━━━━━━━━━━━━━━\n"
-                f"😮‍💨 *کلیک...* {uname(victim)} زنده موند!\n"
-                f"👥 زنده‌ها: {len(alive)} نفر"
-            )
+    if random.randint(1, 6) <= 2:  # 💥 گلوله!
+        gd["alive"].remove(target)
+        extra = f"💥 **بنگ!** {uname(shooter)} زد و {uname(target)} حذف شد! ☠️\n"
+        # راند تمام — نفر بعدی شروع‌کننده راند بعده
+        await roulette_next_round(room, context, extra)
+    else:
+        # کلیک خالی → نوبت به نفر بعدی همین راند
+        gd["turn"] = (gd["turn"] + 1) % len(gd["alive"])
+        extra = f"😮‍💨 *کلیک...* پوکه خالی بود! {uname(target)} زنده موند!\n"
+        await edit_room_msg(room, context, roulette_status(room, extra), roulette_keyboard(room))
+        await roulette_bot_turn(room, context)
+
+async def roulette_bot_turn(room, context):
+    """🤖 اگه نوبت خر باته، خودش یه هدف تصادفی انتخاب می‌کنه"""
+    gd = room.game_data
+    while not room.finished and BOT_ID in gd["alive"] and gd["alive"][gd["turn"]] == BOT_ID:
         await asyncio.sleep(1.5)
+        if room.finished: return
+        targets = [p for p in gd["alive"] if p != BOT_ID]
+        if not targets: return
+        target = random.choice(targets)
+        await roulette_shoot(room, context, BOT_ID, target)
+
+async def roulette_action(room, context, query, target_str):
+    gd = room.game_data
+    uid = query.from_user.id
+    shooter = gd["alive"][gd["turn"]]
     
-    winner = alive[0]
-    add_coins(winner, room.pot())
-    record_win(winner)
-    for p in room.players:
-        if p != winner:
-            record_loss(p)
+    if uid not in gd["alive"]:
+        await query.answer("☠️ تو حذف شدی! فقط تماشا کن!", show_alert=True)
+        return
+    if uid != shooter:
+        await query.answer("⏳ نوبت تو نیست!", show_alert=True)
+        return
     
-    await finish_game(room, context,
-        f"🔫 **رولت روسی — پایان**\n━━━━━━━━━━━━━━\n"
-        f"🏆 آخرین بازمانده: **{uname(winner)}**\n"
-        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+    try:
+        target = int(target_str)
+    except ValueError:
+        return
+    if target not in gd["alive"] or target == uid:
+        await query.answer("❌ هدف نامعتبره!", show_alert=True)
+        return
+    
+    await query.answer("🔫 شلیک!")
+    await roulette_shoot(room, context, uid, target)
 
 # ------------------------------------------------------------
 # 🎰 پوکر ۵ کارتی (۲ تا ۶ نفره)
@@ -1987,6 +2270,8 @@ async def game_action_router(update, context, query, data):
         await crash_action(room, context, query)
     elif payload.startswith("hilo_"):
         await hilo_action(room, context, query, payload[5:])
+    elif payload.startswith("rr_"):
+        await roulette_action(room, context, query, payload[3:])
 
 # ============================================================
 # بازی‌های قمار تکی (فوری — بدون اتاق)
@@ -2123,6 +2408,7 @@ def owner_panel_keyboard():
          InlineKeyboardButton("📥 بازیابی", callback_data="panel_restore_help")],
         [InlineKeyboardButton("💰 مدیریت سکه", callback_data="panel_cmd_coins"),
          InlineKeyboardButton("🎁 کادو دادن", callback_data="panel_cmd_gifts")],
+        [InlineKeyboardButton("🎊 دستورات همگانی", callback_data="panel_cmd_mass")],
         [InlineKeyboardButton("🚫 بن و آنبن", callback_data="panel_cmd_ban"),
          InlineKeyboardButton("📖 همه دستورات", callback_data="panel_cmd_all")]
     ])
@@ -2181,6 +2467,21 @@ PANEL_GUIDES = {
         "✅ دوباره می‌تونه بازی کنه\n\n"
         "💡 لیست بن‌شده‌ها رو می‌تونی از «👥 دیتابیس بازیکنان» ببینی — کنار اسمشون 🚫بن نوشته شده."
     ),
+    "panel_cmd_mass": (
+        "🎊 **دستورات همگانی — آموزش کامل**\n"
+        "━━━━━━━━━━━━━━\n"
+        "**💰 سکه دادن به همه بازیکنان:**\n"
+        "بنویس: `سکه‌همگانی 500`\n"
+        "✅ به تک‌تک بازیکنان ثبت‌شده ۵۰۰ سکه اضافه می‌شه\n"
+        "💡 مناسب جشن، مناسبت یا عذرخواهی بابت قطعی! 😄\n"
+        "⚠️ حداکثر ۱٬۰۰۰٬۰۰۰ در هر بار\n\n"
+        "**📢 پیام همگانی به همه چت‌ها:**\n"
+        "بنویس: `اطلاعیه سلام! آپدیت جدید اومد 🎉`\n"
+        "✅ پیامت با سربرگ «اطلاعیه طویله خرستان» به همه گروه‌ها و پی‌وی‌هایی که ربات توشون فعاله فرستاده می‌شه\n"
+        "📊 آخرش گزارش می‌گیری: چند تا موفق، چند تا ناموفق\n"
+        "🧹 چت‌هایی که ربات ازشون حذف شده خودکار از لیست پاک می‌شن\n\n"
+        "⏱️ ارسال با فاصله انجام می‌شه که تلگرام ربات رو محدود نکنه."
+    ),
     "panel_cmd_all": (
         "📖 **همه دستورات اونر — یکجا**\n"
         "━━━━━━━━━━━━━━\n"
@@ -2188,6 +2489,9 @@ PANEL_GUIDES = {
         "`پنل` — باز کردن همین پنل\n"
         "`بکاپ` — دریافت فایل بکاپ دیتابیس\n"
         "ارسال فایل بکاپ با کپشن `بازیابی` — برگردوندن دیتا\n\n"
+        "**🎊 همگانی:**\n"
+        "`سکه‌همگانی 500` — سکه به همه بازیکنان\n"
+        "`اطلاعیه متن پیام` — پیام به همه گروه‌ها و پی‌وی‌ها\n\n"
         "**👤 مدیریت کاربر (همه با ریپلی):**\n"
         "`+سکه 1000` — اضافه کردن سکه\n"
         "`-سکه 500` — کم کردن سکه\n"
@@ -2253,11 +2557,13 @@ def export_db_json():
     with closing(db_connect()) as db:
         users = [dict(r) for r in db.execute("SELECT * FROM users").fetchall()]
         donkeys = [dict(r) for r in db.execute("SELECT * FROM donkeys").fetchall()]
+        chats = [dict(r) for r in db.execute("SELECT * FROM chats").fetchall()]
     return {
         "version": 1,
         "exported_at": int(time.time()),
         "users": users,
-        "donkeys": donkeys
+        "donkeys": donkeys,
+        "chats": chats
     }
 
 def import_db_json(data):
@@ -2287,6 +2593,12 @@ def import_db_json(data):
             vals = [d.get(c, "" if c != "user_id" else 0) for c in donkey_cols]
             placeholders = ",".join("?" * len(donkey_cols))
             db.execute(f"INSERT OR REPLACE INTO donkeys ({','.join(donkey_cols)}) VALUES ({placeholders})", vals)
+        # 💬 چت‌ها هم برگردن (برای پیام همگانی)
+        for ch in data.get("chats", []):
+            if "chat_id" not in ch: continue
+            db.execute(
+                "INSERT OR REPLACE INTO chats (chat_id, chat_type, title, last_seen) VALUES (?, ?, ?, ?)",
+                (ch["chat_id"], ch.get("chat_type", ""), ch.get("title", ""), ch.get("last_seen", 0)))
         db.commit()
     return count
 
@@ -2348,8 +2660,8 @@ HELP_SECTIONS = {
         "🎮 **بازی‌های گروهی** — اسم بازی + شرط:\n"
         "━━━━━━━━━━━━━━\n"
         "💥 `انفجار 100` — ضریب بالا می‌ره، قبل انفجار برداشت کن! (تا ۱۰ نفر)\n"
-        "🎲 `تاس 100` — بالاترین تاس می‌بره (تا ۱۰ نفر)\n"
-        "🔫 `رولت 100` — آخرین بازمانده همه رو می‌بره (تا ۱۰ نفر)\n"
+        "🎲 `تاس 100` — هر کی **خودش ایموجی 🎲 می‌فرسته**، بالاترین عدد می‌بره! (تا ۱۰ نفر)\n"
+        "🔫 `رولت 100` — نوبتی انتخاب کن به کی شلیک بشه! آخرین بازمانده می‌بره (تا ۱۰ نفر)\n"
         "🔼🔽 `حدس 100` — حدس مجموع دو تاس، دقیقاً ۷ = x5 (تا ۱۰ نفر)\n"
         "🎰 `پوکر 100` — بهترین دست ۵ کارتی می‌بره (تا ۶ نفر)\n"
         "🃏 `بلک‌جک 100` — نزدیک‌ترین به ۲۱ بدون سوختن (تا ۶ نفر)\n"
@@ -2359,7 +2671,9 @@ HELP_SECTIONS = {
         "🎰 **بازی فوری تکی:**\n"
         "`اسلات 100` — سه‌تایی 7️⃣ = x20 جکپات!\n"
         "`دوبل 100` — شانس ۵۰-۵۰، دوبل یا هیچی!\n\n"
-        "💡 بازی‌های ۲ نفره با ورود نفر دوم خودکار شروع می‌شن."
+        "💡 بازی‌های ۲ نفره با ورود نفر دوم خودکار شروع می‌شن.\n"
+        "💡 می‌تونی فقط اسم بازی رو بنویسی (مثلاً `انفجار`) تا ربات مبلغ شرط رو ازت بپرسه.\n"
+        "⏰ اگه بازی تا ۵ دقیقه شروع نشه، خودکار لغو می‌شه و شرط‌ها برمی‌گرده."
     ),
     "help_money": (
         "💰 **راه‌های پول درآوردن:**\n"
@@ -2380,7 +2694,8 @@ HELP_SECTIONS = {
         "🐴 `خرم` — نمایش خرت با تجهیزاتش\n"
         "🏪 `فروشگاه` — خرید کلاه، زین، نعل، کروات، لباس، اکسسوری\n"
         "👤 `پروفایل` — مشخصات کامل (با ریپلی: پروفایل بقیه)\n"
-        "❤️ `جفت‌گیری` (با ریپلی) — کره‌خر دار شو! (سطح ۲ لازمه، ۵۰۰ سکه)\n"
+        "❤️ `جفت‌گیری` یا `جفتگیری` (با ریپلی) — کره‌خر دار شو! (سطح ۲ لازمه، ۵۰۰ سکه)\n"
+        "💌 طرف مقابل باید با دکمه «قبوله!» موافقت کنه وگرنه انجام نمی‌شه\n"
         "⭐ با پول بیشتر، سطح و لقبت بالاتر می‌ره:\n"
         "🐣 کره‌خر تازه‌کار → ... → 👑 خدا خرها"
     ),
@@ -2415,7 +2730,9 @@ OWNER_HELP_TEXT = (
     "━━━━━━━━━━━━━━\n"
     "`اونر` یا `پنل` — پنل مدیریت: دیتابیس بازیکنان، آمار، بکاپ 🎛️\n"
     "`بکاپ` — دریافت فایل بکاپ کامل دیتابیس 💾\n"
-    "ارسال فایل بکاپ با کپشن `بازیابی` — برگرداندن دیتابیس 📥\n\n"
+    "ارسال فایل بکاپ با کپشن `بازیابی` — برگرداندن دیتابیس 📥\n"
+    "`سکه‌همگانی 500` — سکه به **همه** بازیکنان 🎊\n"
+    "`اطلاعیه متن...` — پیام به **همه** گروه‌ها و پی‌وی‌ها 📢\n\n"
     "**با ریپلی:**\n"
     "`+سکه 1000` — سکه دادن 💰\n"
     "`-سکه 1000` — کسر سکه 🔥\n"
@@ -2441,6 +2758,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
     ensure_user(user.id, user.first_name)
+    track_chat(update.effective_chat)
     
     u_data = get_user(user.id)
     if u_data and u_data["is_banned"] == 1:
@@ -2473,6 +2791,90 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👑 **پنل مدیریت طویله**\n━━━━━━━━━━━━━━\nفقط برای اونر! انتخاب کن:",
             owner_panel_keyboard()
         )
+        return
+    
+    # ===== 💰 سکه همگانی (فقط اونر): «سکه‌همگانی 500» =====
+    parts_ow = text.split()
+    if parts_ow and parts_ow[0] in ["سکه‌همگانی", "سکه همگانی", "پول‌همگانی", "massgive"] and user.id == OWNER_ID:
+        if len(parts_ow) < 2 or not parts_ow[1].translate(FA_DIGITS).isdigit():
+            await update.message.reply_text(
+                "💰 روش استفاده: `سکه‌همگانی 500`\nبه **همه بازیکنان** این مقدار سکه داده می‌شه.",
+                parse_mode="Markdown")
+            return
+        amt = int(parts_ow[1].translate(FA_DIGITS))
+        if amt <= 0 or amt > 1000000:
+            await update.message.reply_text("❌ مبلغ باید بین ۱ تا ۱٬۰۰۰٬۰۰۰ باشه!")
+            return
+        with closing(db_connect()) as db:
+            cnt = db.execute("SELECT COUNT(*) as c FROM users").fetchone()["c"]
+            db.execute("UPDATE users SET coins = coins + ?", (amt,))
+            db.commit()
+        await update.message.reply_text(
+            f"🎊 **باران {CURRENCY_NAME} در طویله!**\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"💰 مبلغ: **{amt:,}** {CURRENCY_NAME}\n"
+            f"👥 به **{cnt}** بازیکن داده شد!\n\n"
+            f"🐴 همه دارن عرعر خوشحالی می‌کنن! 🎉",
+            parse_mode="Markdown")
+        return
+    # جلوی سوءاستفاده: کاربر عادی این دستور رو بزنه، هیچی نگو
+    if parts_ow and parts_ow[0] in ["سکه‌همگانی", "سکه همگانی", "پول‌همگانی", "massgive"]:
+        return
+    
+    # ===== 📢 پیام همگانی (فقط اونر): «اطلاعیه متن پیام...» =====
+    if parts_ow and parts_ow[0] in ["اطلاعیه", "همگانی", "broadcast"] and user.id == OWNER_ID:
+        bc_text = text[len(parts_ow[0]):].strip()
+        if not bc_text:
+            await update.message.reply_text(
+                "📢 روش استفاده:\n`اطلاعیه سلام به همه!`\n\n"
+                "پیامت به **همه گروه‌ها و پی‌وی‌هایی** که ربات توشونه فرستاده می‌شه.",
+                parse_mode="Markdown")
+            return
+        
+        with closing(db_connect()) as db:
+            chats = db.execute("SELECT chat_id, chat_type FROM chats").fetchall()
+        
+        if not chats:
+            await update.message.reply_text("❌ هنوز هیچ چتی ثبت نشده!")
+            return
+        
+        status_msg = await update.message.reply_text(f"📤 در حال ارسال به {len(chats)} چت...")
+        
+        ok, fail = 0, 0
+        dead_chats = []
+        for ch in chats:
+            try:
+                await context.bot.send_message(
+                    chat_id=ch["chat_id"],
+                    text=f"📢 **اطلاعیه طویله خرستان**\n━━━━━━━━━━━━━━\n{bc_text}",
+                    parse_mode="Markdown"
+                )
+                ok += 1
+            except Exception as e:
+                fail += 1
+                err = str(e).lower()
+                # چت‌هایی که ربات ازشون حذف شده رو پاک کن
+                if "blocked" in err or "kicked" in err or "not found" in err or "deactivated" in err:
+                    dead_chats.append(ch["chat_id"])
+            await asyncio.sleep(0.1)  # رعایت محدودیت تلگرام (۳۰ پیام/ثانیه)
+        
+        if dead_chats:
+            with closing(db_connect()) as db:
+                db.executemany("DELETE FROM chats WHERE chat_id = ?", [(c,) for c in dead_chats])
+                db.commit()
+        
+        try:
+            await status_msg.edit_text(
+                f"📢 **اطلاعیه ارسال شد!**\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"✅ موفق: {ok} چت\n"
+                f"❌ ناموفق: {fail} چت"
+                + (f"\n🧹 {len(dead_chats)} چت مرده از لیست پاک شد" if dead_chats else "")
+            )
+        except Exception:
+            pass
+        return
+    if parts_ow and parts_ow[0] in ["اطلاعیه", "همگانی", "broadcast"]:
         return
     
     # ===== 💾 بکاپ متنی سریع =====
@@ -2575,7 +2977,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # ===== جفت‌گیری =====
-    if text == "جفت‌گیری":
+    if text in ["جفت‌گیری", "جفت گیری", "جفتگیری"]:
         await mate_command(update, context)
         return
     
@@ -2653,13 +3055,32 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await double_game(update, context, bet)
         return
     
-    # ===== ساخت بازی گروهی با دستور فارسی (مثلاً: انفجار 100) =====
+    # ===== ساخت بازی گروهی با دستور فارسی (مثلاً: انفجار 100 یا فقط: انفجار) =====
     if parts_fa and parts_fa[0] in GAME_ALIASES:
         game_type = GAME_ALIASES[parts_fa[0]]
         bet = parse_bet_arg(parts_fa)
         if bet is None:
+            if len(parts_fa) >= 2:
+                # عدد نوشته ولی نامعتبره
+                await update.message.reply_text(
+                    f"❌ مبلغ نامعتبره! حداقل شرط {MIN_BET} {CURRENCY_NAME} است.\nمثال: `{parts_fa[0]} 100`",
+                    parse_mode="Markdown")
+                return
+            # فقط اسم بازی رو نوشته → مبلغ شرط رو بپرس
+            if user.id in PLAYER_IN_GAME:
+                await update.message.reply_text("⚠️ شما در یک بازی دیگر هستید! اول اون رو تموم کن.")
+                return
+            context.user_data["temp_game"] = game_type
+            context.user_data["awaiting_bet"] = True
+            context.user_data["bet_tries"] = 0
+            pl = "دقیقاً ۲ بازیکن" if game_type in TWO_PLAYER_GAMES else f"۲ تا {GAME_MAX_PLAYERS[game_type]} بازیکن"
             await update.message.reply_text(
-                f"🎮 روش ساخت بازی: `{parts_fa[0]} 100` (حداقل شرط {MIN_BET})",
+                f"🎮 **{GAME_NAMES[game_type]}**\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💰 حداقل شرط: {MIN_BET} {CURRENCY_NAME}\n"
+                f"👥 {pl}\n"
+                f"💳 موجودی تو: {get_user(user.id)['coins']:,} {CURRENCY_NAME}\n\n"
+                f"💬 مبلغ شرط رو بنویس (فقط عدد):",
                 parse_mode="Markdown")
             return
         await start_room_from_text(update, context, game_type, bet)
@@ -2731,26 +3152,44 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ============================================================
     
     if context.user_data.get("awaiting_bet"):
+        
+        async def bet_fail(err_msg):
+            """❌ ورودی نامعتبر: فقط ۲ بار اخطار، بار سوم درخواست بازی بسته می‌شود"""
+            tries = context.user_data.get("bet_tries", 0) + 1
+            context.user_data["bet_tries"] = tries
+            if tries >= 3:
+                context.user_data["awaiting_bet"] = False
+                context.user_data["temp_game"] = None
+                context.user_data["bet_tries"] = 0
+                await update.message.reply_text(
+                    "🚪 **درخواست بازی بسته شد!**\n"
+                    "۳ بار عدد معتبر وارد نکردی. هر وقت خواستی دوباره بازی بساز. 🐴",
+                    parse_mode="Markdown")
+            else:
+                await update.message.reply_text(f"{err_msg}\n⚠️ فرصت باقی‌مانده: {2 - tries + 1} از ۲")
+        
         normalized = text.translate(FA_DIGITS)
         if normalized.isdigit():
             bet = int(normalized)
             if bet < MIN_BET:
-                await update.message.reply_text(f"❌ حداقل شرط {MIN_BET} {CURRENCY_NAME} است!")
+                await bet_fail(f"❌ حداقل شرط {MIN_BET} {CURRENCY_NAME} است!")
                 return
             
             u = get_user(user.id)
             if u["coins"] < bet:
-                await update.message.reply_text(f"❌ پول کافی ندارید! موجودی: {u['coins']:,} {CURRENCY_NAME}")
+                await bet_fail(f"❌ پول کافی ندارید! موجودی: {u['coins']:,} {CURRENCY_NAME}")
                 return
             
             game_type = context.user_data.get("temp_game")
             if not game_type:
                 context.user_data["awaiting_bet"] = False
+                context.user_data["bet_tries"] = 0
                 await update.message.reply_text("❌ خطا! دوباره از منو بازی رو انتخاب کن.")
                 return
             
             if user.id in PLAYER_IN_GAME:
                 context.user_data["awaiting_bet"] = False
+                context.user_data["bet_tries"] = 0
                 await update.message.reply_text("⚠️ شما در یک بازی دیگر هستید!")
                 return
             
@@ -2777,9 +3216,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
             context.user_data["awaiting_bet"] = False
             context.user_data["temp_game"] = None
+            context.user_data["bet_tries"] = 0
             
         else:
-            await update.message.reply_text("❌ لطفاً یک عدد معتبر وارد کنید!")
+            await bet_fail("❌ لطفاً یک عدد معتبر وارد کنید!")
         return
 
 # ============================================================
@@ -2801,6 +3241,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== اکشن‌های داخل بازی (جواب query داخل خود اکشن داده می‌شود) =====
     if data.startswith("g|"):
         await game_action_router(update, context, query, data)
+        return
+    
+    # ===== 💌 جواب درخواست جفت‌گیری (فقط طرف مقابل) =====
+    if data in ["mate_yes", "mate_no"]:
+        await mate_callback(update, context, query, "yes" if data == "mate_yes" else "no")
         return
     
     # ===== 🔒 قفل منو: هر منویی فقط برای کسی که بازش کرده =====
@@ -2962,6 +3407,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         context.user_data["temp_game"] = game_type
         context.user_data["awaiting_bet"] = True
+        context.user_data["bet_tries"] = 0
         
         pl = "دقیقاً ۲ بازیکن" if game_type in TWO_PLAYER_GAMES else f"۲ تا {GAME_MAX_PLAYERS[game_type]} بازیکن"
         await query.edit_message_text(
@@ -3229,6 +3675,7 @@ def main():
     
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT, message_handler))
+    app.add_handler(MessageHandler(filters.Dice.DICE, dice_roll_received))
     app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(error_handler)
