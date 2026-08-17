@@ -1041,8 +1041,20 @@ def menu_owner_of(chat_id, message_id):
     return MENU_OWNERS.get((chat_id, message_id))
 
 ROOM_TTL = 3600          # اتاق منتظر، بعد از یک ساعت پاک می‌شود
-STARTED_TTL = 1800       # بازی گیرکرده، بعد از نیم ساعت پاک و شرط برگردانده می‌شود
+STARTED_TTL = 1800       # سقف مطلق عمر یک بازی شروع‌شده
+STUCK_TIMEOUT = 180      # ⚡ بازی شروع‌شده بدون هیچ حرکتی بعد از ۳ دقیقه = گیر کرده → لغو و برگشت شرط
 _ROOM_COUNTER = 0
+
+def player_active_room(uid):
+    """اتاق فعال بازیکن — اگر اتاق مرده باشد، قفل بازیکن هم آزاد می‌شود"""
+    rid = PLAYER_IN_GAME.get(uid)
+    if not rid:
+        return None
+    room = ACTIVE_ROOMS.get(rid)
+    if not room or room.finished:
+        PLAYER_IN_GAME.pop(uid, None)  # 🔓 رفع گیر: اتاق وجود ندارد
+        return None
+    return room
 
 @dataclass
 class GameRoom:
@@ -1058,6 +1070,7 @@ class GameRoom:
     game_data: dict = field(default_factory=dict)
     message_id: int = 0
     created_at: float = field(default_factory=time.time)
+    last_action: float = field(default_factory=time.time)
 
     def add_player(self, user_id: int) -> bool:
         if len(self.players) >= self.max_players:
@@ -1070,26 +1083,43 @@ class GameRoom:
     def pot(self) -> int:
         return self.bet * len(self.players)
 
+def _room_is_stale(room, now):
+    """تشخیص اتاق مرده/گیرکرده"""
+    if not room.started:
+        return now - room.created_at > ROOM_TTL
+    # بازی شروع‌شده: یا خیلی قدیمیه، یا هیچ حرکتی توش نشده (گیر کرده)
+    if now - room.created_at > STARTED_TTL:
+        return True
+    # بازی‌های خودکار (انفجار، رولت با تسک) خودشون جلو می‌رن؛ گیرشون با last_action چک می‌شه
+    if now - room.last_action > STUCK_TIMEOUT:
+        return True
+    return False
+
+def refund_room(room):
+    """💰 برگشت شرط همه بازیکنانی که طلبکارند"""
+    if room.finished:
+        return
+    for p in room.players:
+        # اگر در انفجار قبلاً برداشت کرده، دیگر پولی طلبکار نیست
+        if room.game_type == "crash" and p in room.game_data.get("cashed", {}):
+            continue
+        add_coins(p, room.bet)
+
 def purge_stale_rooms():
-    """اتاق‌های رهاشده را پاک می‌کند و شرط بازیکنان را برمی‌گرداند"""
+    """اتاق‌های رهاشده/گیرکرده را پاک می‌کند و شرط بازیکنان را برمی‌گرداند"""
     now = time.time()
     for rid in list(ACTIVE_ROOMS.keys()):
         room = ACTIVE_ROOMS.get(rid)
         if not room:
             continue
-        ttl = STARTED_TTL if room.started else ROOM_TTL
-        if now - room.created_at > ttl:
-            if not room.finished:
-                for p in room.players:
-                    # اگر در انفجار قبلاً برداشت کرده، دیگر پولی طلبکار نیست
-                    if room.game_type == "crash" and p in room.game_data.get("cashed", {}):
-                        continue
-                    add_coins(p, room.bet)
+        if _room_is_stale(room, now):
+            refund_room(room)
+            room.finished = True
             for p in room.players:
                 if PLAYER_IN_GAME.get(p) == rid:
                     PLAYER_IN_GAME.pop(p, None)
             ACTIVE_ROOMS.pop(rid, None)
-            logger.info(f"🧹 اتاق قدیمی {rid} پاک شد")
+            logger.info(f"🧹 اتاق گیرکرده/قدیمی {rid} ({room.game_type}) پاک شد و شرط‌ها برگشت")
 
 def get_room(room_id: str):
     purge_stale_rooms()
@@ -1412,6 +1442,7 @@ async def finish_game(room, context, text):
 async def start_game(room: GameRoom, context: ContextTypes.DEFAULT_TYPE, query):
     """اجرای بازی انتخاب‌شده بعد از دکمه شروع"""
     room.started = True
+    room.last_action = time.time()
     gt = room.game_type
     if gt == "rps":
         await rps_begin(room, context)
@@ -1527,23 +1558,54 @@ def ttt_winner(b):
             return b[a]
     return None
 
-def ttt_bot_move(board, my_mark, opp_mark):
-    """🤖 هوش خر بات در دوز: اول برد، بعد دفاع، بعد مرکز، بعد گوشه"""
+def _ttt_minimax(board, my_mark, opp_mark, is_my_turn, depth=0):
+    """محاسبه کامل همه حالت‌ها — خروجی: امتیاز بهترین نتیجه ممکن"""
+    w = ttt_winner(board)
+    if w == my_mark:
+        return 10 - depth       # برد سریع‌تر بهتره
+    if w == opp_mark:
+        return depth - 10       # باخت دیرتر بهتره
     empty = [i for i in range(9) if not board[i]]
-    lines = [(0,1,2),(3,4,5),(6,7,8),(0,3,6),(1,4,7),(2,5,8),(0,4,8),(2,4,6)]
-    # ۱. اگر می‌تونه ببره
+    if not empty:
+        return 0                # مساوی
+    
+    if is_my_turn:
+        best = -100
+        for i in empty:
+            board[i] = my_mark
+            best = max(best, _ttt_minimax(board, my_mark, opp_mark, False, depth + 1))
+            board[i] = ""
+        return best
+    else:
+        worst = 100
+        for i in empty:
+            board[i] = opp_mark
+            worst = min(worst, _ttt_minimax(board, my_mark, opp_mark, True, depth + 1))
+            board[i] = ""
+        return worst
+
+def ttt_bot_move(board, my_mark, opp_mark):
+    """🤖 هوش کامل خر بات: Minimax — همه حالت‌ها رو می‌بینه، تله دو گوشه هم روش کار نمی‌کنه!"""
+    empty = [i for i in range(9) if not board[i]]
+    if not empty:
+        return None
+    # حرکت اول: مرکز یا گوشه (برای سرعت، بدون محاسبه)
+    if len(empty) >= 8:
+        return 4 if 4 in empty else random.choice([0, 2, 6, 8])
+    
+    b = board[:]
+    best_score = -100
+    best_moves = []
     for i in empty:
-        b = board[:]; b[i] = my_mark
-        if ttt_winner(b): return i
-    # ۲. اگر حریف داره می‌بره، سد کن
-    for i in empty:
-        b = board[:]; b[i] = opp_mark
-        if ttt_winner(b): return i
-    # ۳. مرکز، گوشه، بقیه
-    if 4 in empty: return 4
-    corners = [i for i in [0, 2, 6, 8] if i in empty]
-    if corners: return random.choice(corners)
-    return random.choice(empty)
+        b[i] = my_mark
+        score = _ttt_minimax(b, my_mark, opp_mark, False, 1)
+        b[i] = ""
+        if score > best_score:
+            best_score = score
+            best_moves = [i]
+        elif score == best_score:
+            best_moves.append(i)
+    return random.choice(best_moves)
 
 async def ttt_begin(room, context):
     room.game_data = {"board": [""] * 9, "turn": 0}
@@ -1771,6 +1833,7 @@ async def dice_roll_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     # 🎲 عدد واقعی تاس تلگرام
     gd["rolls"][uid] = msg.dice.value
+    room.last_action = time.time()
     
     # همه انداختن؟ → نتیجه (کمی صبر تا انیمیشن تاس تموم شه)
     if len(gd["rolls"]) == len(room.players):
@@ -1848,6 +1911,7 @@ async def roulette_next_round(room, context, extra):
 async def roulette_shoot(room, context, shooter, target):
     """شلیک: ۲ از ۶ احتمال گلوله. حذف = پایان راند"""
     gd = room.game_data
+    room.last_action = time.time()
     await edit_room_msg(room, context,
         f"🔫 **رولت روسی — راند {gd['round']}**\n━━━━━━━━━━━━━━\n"
         f"😰 {uname(shooter)} هفت‌تیر رو گرفت سمت {uname(target)}...\n"
@@ -2118,6 +2182,7 @@ async def crash_loop(room, context):
                 return
             
             gd["mult"] = round(gd["mult"] * random.uniform(1.12, 1.35), 2)
+            room.last_action = time.time()  # ⚡ حلقه انفجار زنده‌ست
             
             # 🤖 برداشت خودکار خر بات وقتی به هدفش برسه
             if (BOT_ID in room.players and BOT_ID not in gd["cashed"]
@@ -2260,18 +2325,34 @@ async def game_action_router(update, context, query, data):
         await query.answer("❌ تو توی این بازی نیستی!", show_alert=True)
         return
     
-    if payload.startswith("rps_"):
-        await rps_action(room, context, query, payload[4:])
-    elif payload.startswith("ttt_"):
-        await ttt_action(room, context, query, payload[4:])
-    elif payload.startswith("bj_"):
-        await bj_action(room, context, query, payload[3:])
-    elif payload == "crash_cash":
-        await crash_action(room, context, query)
-    elif payload.startswith("hilo_"):
-        await hilo_action(room, context, query, payload[5:])
-    elif payload.startswith("rr_"):
-        await roulette_action(room, context, query, payload[3:])
+    room.last_action = time.time()  # ⚡ ضد گیر: ثبت آخرین حرکت
+    
+    try:
+        if payload.startswith("rps_"):
+            await rps_action(room, context, query, payload[4:])
+        elif payload.startswith("ttt_"):
+            await ttt_action(room, context, query, payload[4:])
+        elif payload.startswith("bj_"):
+            await bj_action(room, context, query, payload[3:])
+        elif payload == "crash_cash":
+            await crash_action(room, context, query)
+        elif payload.startswith("hilo_"):
+            await hilo_action(room, context, query, payload[5:])
+        elif payload.startswith("rr_"):
+            await roulette_action(room, context, query, payload[3:])
+    except Exception as e:
+        # 🛡️ خطای وسط بازی نباید بازی رو برای همیشه قفل کنه
+        logger.error(f"❌ خطا وسط بازی {room.game_type} ({room.room_id}): {e}")
+        if ACTIVE_ROOMS.get(room.room_id) is room and not room.finished:
+            refund_room(room)
+            room.finished = True
+            cleanup_room(room.room_id)
+            try:
+                await edit_room_msg(room, context,
+                    "⚠️ **بازی به دلیل خطا لغو شد!**\n💰 شرط همه بازیکنان برگشت داده شد.",
+                    result_keyboard())
+            except Exception:
+                pass
 
 # ============================================================
 # بازی‌های قمار تکی (فوری — بدون اتاق)
@@ -2351,7 +2432,7 @@ async def start_room_from_text(update, context, game_type, bet):
     """ساخت اتاق بازی مستقیم با دستور فارسی مثل «انفجار 100»"""
     user = update.effective_user
     
-    if user.id in PLAYER_IN_GAME:
+    if player_active_room(user.id):
         await update.message.reply_text("⚠️ شما در یک بازی دیگر هستید! اول اون رو تموم کن.")
         return
     
@@ -2673,7 +2754,8 @@ HELP_SECTIONS = {
         "`دوبل 100` — شانس ۵۰-۵۰، دوبل یا هیچی!\n\n"
         "💡 بازی‌های ۲ نفره با ورود نفر دوم خودکار شروع می‌شن.\n"
         "💡 می‌تونی فقط اسم بازی رو بنویسی (مثلاً `انفجار`) تا ربات مبلغ شرط رو ازت بپرسه.\n"
-        "⏰ اگه بازی تا ۵ دقیقه شروع نشه، خودکار لغو می‌شه و شرط‌ها برمی‌گرده."
+        "⏰ اگه بازی تا ۵ دقیقه شروع نشه، خودکار لغو می‌شه و شرط‌ها برمی‌گرده.\n"
+        "🆘 بازی گیر کرد؟ بنویس `لغو بازی` — اگه ۳ دقیقه حرکتی نشده باشه لغو می‌شه و پول همه برمی‌گرده."
     ),
     "help_money": (
         "💰 **راه‌های پول درآوردن:**\n"
@@ -2971,6 +3053,38 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # ===== 🆘 لغو بازی گیرکرده =====
+    if text in ["لغو بازی", "لغوبازی", "خروج از بازی", "cancelgame"]:
+        room = player_active_room(user.id)
+        if not room:
+            await update.message.reply_text("✅ تو الان توی هیچ بازی‌ای نیستی!")
+            return
+        # اتاق شروع‌نشده: اگه سازنده‌ای کل اتاق لغو می‌شه، وگرنه فقط خودت خارج می‌شی
+        if not room.started:
+            if room.creator_id == user.id:
+                refund_room(room)
+                cleanup_room(room.room_id)
+                await update.message.reply_text("❌ اتاقت لغو شد و شرط همه برگشت داده شد.")
+            else:
+                room.players.remove(user.id)
+                add_coins(user.id, room.bet)
+                PLAYER_IN_GAME.pop(user.id, None)
+                await update.message.reply_text("🚪 از اتاق خارج شدی و شرطت برگشت.")
+            return
+        # بازی شروع‌شده: فقط اگه گیر کرده باشه (۳ دقیقه بی‌حرکت) قابل لغوئه
+        if time.time() - room.last_action > STUCK_TIMEOUT:
+            refund_room(room)
+            room.finished = True
+            cleanup_room(room.room_id)
+            await update.message.reply_text(
+                "🧹 **بازی گیرکرده لغو شد!**\n💰 شرط همه بازیکنان برگشت داده شد.",
+                parse_mode="Markdown")
+        else:
+            remaining = int(STUCK_TIMEOUT - (time.time() - room.last_action))
+            await update.message.reply_text(
+                f"⏳ بازی هنوز فعاله! اگه {remaining} ثانیه دیگه هیچ حرکتی نشه، می‌تونی با «لغو بازی» آزادش کنی.")
+        return
+    
     # ===== جایزه روزانه =====
     if text in ["روزانه", "daily", "جایزه روزانه"]:
         await daily_reward(update, context)
@@ -3067,7 +3181,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     parse_mode="Markdown")
                 return
             # فقط اسم بازی رو نوشته → مبلغ شرط رو بپرس
-            if user.id in PLAYER_IN_GAME:
+            if player_active_room(user.id):
                 await update.message.reply_text("⚠️ شما در یک بازی دیگر هستید! اول اون رو تموم کن.")
                 return
             context.user_data["temp_game"] = game_type
@@ -3187,7 +3301,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ خطا! دوباره از منو بازی رو انتخاب کن.")
                 return
             
-            if user.id in PLAYER_IN_GAME:
+            if player_active_room(user.id):
                 context.user_data["awaiting_bet"] = False
                 context.user_data["bet_tries"] = 0
                 await update.message.reply_text("⚠️ شما در یک بازی دیگر هستید!")
@@ -3401,7 +3515,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if game_type not in GAME_NAMES:
             return
         
-        if user.id in PLAYER_IN_GAME:
+        if player_active_room(user.id):
             await query.answer("⚠️ شما در یک بازی دیگر هستید!", show_alert=True)
             return
         
@@ -3444,7 +3558,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(room.players) >= room.max_players:
             await query.answer("❌ ظرفیت پر است!", show_alert=True)
             return
-        if user.id in PLAYER_IN_GAME:
+        if player_active_room(user.id):
             await query.answer("⚠️ شما در یک بازی دیگر هستید!", show_alert=True)
             return
         
@@ -3658,6 +3772,36 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("❌ خطای هندل‌نشده:", exc_info=context.error)
 
+async def janitor_job(context: ContextTypes.DEFAULT_TYPE):
+    """🧹 نظافتچی دوره‌ای: هر دقیقه اتاق‌های گیرکرده رو پاک می‌کنه و به گروه خبر می‌ده"""
+    now = time.time()
+    for rid in list(ACTIVE_ROOMS.keys()):
+        room = ACTIVE_ROOMS.get(rid)
+        if not room or room.finished:
+            continue
+        if room.started and now - room.last_action > STUCK_TIMEOUT:
+            refund_room(room)
+            room.finished = True
+            cleanup_room(rid)
+            logger.info(f"🧹 نظافتچی: بازی گیرکرده {rid} ({room.game_type}) لغو شد")
+            try:
+                await context.bot.edit_message_text(
+                    f"🧹 **بازی {GAME_NAMES.get(room.game_type, '')} به دلیل بی‌حرکتی لغو شد!**\n"
+                    f"💰 شرط همه بازیکنان برگشت داده شد.",
+                    chat_id=room.chat_id,
+                    message_id=room.message_id,
+                    parse_mode="Markdown"
+                )
+            except Exception:
+                pass
+    # قفل‌های بی‌صاحب (بازیکنی که اتاقش وجود نداره)
+    for uid in list(PLAYER_IN_GAME.keys()):
+        rid = PLAYER_IN_GAME.get(uid)
+        room = ACTIVE_ROOMS.get(rid)
+        if not room or room.finished:
+            PLAYER_IN_GAME.pop(uid, None)
+            logger.info(f"🔓 نظافتچی: قفل بی‌صاحب بازیکن {uid} آزاد شد")
+
 # ============================================================
 # اصلی
 # ============================================================
@@ -3679,6 +3823,14 @@ def main():
     app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(error_handler)
+    
+    # 🧹 نظافتچی هر ۶۰ ثانیه (نیاز به python-telegram-bot[job-queue])
+    if app.job_queue:
+        app.job_queue.run_repeating(janitor_job, interval=60, first=60)
+        logger.info("🧹 نظافتچی دوره‌ای فعال شد")
+    else:
+        logger.warning("⚠️ JobQueue نصب نیست — نظافت فقط موقع فعالیت کاربرا انجام می‌شه. "
+                       "برای فعال‌سازی: pip install 'python-telegram-bot[job-queue]'")
     
     logger.info("✅ ربات خرستان راه‌اندازی شد!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
