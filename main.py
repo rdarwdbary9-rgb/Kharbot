@@ -871,6 +871,87 @@ def baby_line(i, b):
     lv = BABY_LEVELS.get(b.get("level", 1), BABY_LEVELS[1])
     return f"{i}. {lv['emoji']} **{esc_md(b['name'])}** — سطح {b.get('level',1)} ({lv['name']}) | سود روزانه: {lv['income']} {CURRENCY_NAME}"
 
+# ------------------------------------------------------------
+# 🐣 پنل کره‌خرها (دکمه شیشه‌ای)
+# ------------------------------------------------------------
+
+def baby_panel_text(user_id):
+    u = get_user(user_id)
+    if not u:
+        return "❌ کاربر پیدا نشد."
+    babies = load_babies(u)
+    if not babies:
+        return ("🐣 **پنل کره‌خرها**\n━━━━━━━━━━━━━━\n"
+                "هنوز کره‌خری نداری! 😢\n\n"
+                "❤️ روی پیام یه نفر ریپلی بزن و بنویس `جفت‌گیری` تا صاحب کره‌خر شی!\n"
+                f"💰 هر کره‌خر روزی {BABY_LEVELS[1]['income']} تا {BABY_LEVELS[BABY_MAX_LEVEL]['income']} {CURRENCY_NAME} سود می‌ده!")
+    lines = [f"🐣 **پنل کره‌خرهای {esc_md(u['name'])}** ({len(babies)}/{MAX_BABIES})", "━━━━━━━━━━━━━━"]
+    for i, b in enumerate(babies, 1):
+        lv = BABY_LEVELS.get(b.get("level", 1), BABY_LEVELS[1])
+        bar = "🟩" * b.get("level", 1) + "⬜" * (BABY_MAX_LEVEL - b.get("level", 1))
+        lines.append(f"{i}. {lv['emoji']} **{esc_md(b['name'])}**")
+        lines.append(f"   {bar} سطح {b.get('level',1)} ({lv['name']})")
+        if b.get("level", 1) < BABY_MAX_LEVEL:
+            nxt = BABY_LEVELS[b.get("level", 1) + 1]
+            lines.append(f"   💰 سود: {lv['income']}/روز | ⬆️ ارتقا: {nxt['cost']:,}")
+        else:
+            lines.append(f"   💰 سود: {lv['income']}/روز | 🏆 فول‌لِوِل!")
+    total = babies_daily_income(babies)
+    lines.append(f"\n💎 جمع سود روزانه: **{total}** {CURRENCY_NAME}")
+    lines.append(f"💳 موجودیت: {u['coins']:,} {CURRENCY_NAME}")
+    lines.append("\n👇 برای ارتقا یا تغییر اسم، دکمه کره‌خر رو بزن:")
+    return "\n".join(lines)
+
+def baby_panel_keyboard(user_id):
+    u = get_user(user_id)
+    babies = load_babies(u) if u else []
+    rows = []
+    row = []
+    for i, b in enumerate(babies, 1):
+        lv = BABY_LEVELS.get(b.get("level", 1), BABY_LEVELS[1])
+        row.append(InlineKeyboardButton(f"{lv['emoji']} {b['name'][:12]}", callback_data=f"babe_view_{i}"))
+        if len(row) == 2:
+            rows.append(row); row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("🔄 بروزرسانی", callback_data="babe_home"),
+                 InlineKeyboardButton("🏠 منو", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
+def baby_detail_text(user_id, idx):
+    u = get_user(user_id)
+    babies = load_babies(u) if u else []
+    if idx < 1 or idx > len(babies):
+        return None
+    b = babies[idx - 1]
+    lv_no = b.get("level", 1)
+    lv = BABY_LEVELS.get(lv_no, BABY_LEVELS[1])
+    bar = "🟩" * lv_no + "⬜" * (BABY_MAX_LEVEL - lv_no)
+    lines = [f"{lv['emoji']} **{esc_md(b['name'])}** — کره‌خر شماره {idx}", "━━━━━━━━━━━━━━",
+             f"{bar}",
+             f"⭐ سطح: {lv_no} ({lv['name']})",
+             f"💰 سود روزانه: **{lv['income']}** {CURRENCY_NAME}"]
+    if lv_no < BABY_MAX_LEVEL:
+        nxt = BABY_LEVELS[lv_no + 1]
+        lines.append(f"\n⬆️ **ارتقا به سطح {lv_no+1} ({nxt['name']}):**")
+        lines.append(f"💸 هزینه: {nxt['cost']:,} {CURRENCY_NAME}")
+        lines.append(f"💰 سود جدید: {nxt['income']}/روز (+{nxt['income']-lv['income']})")
+        lines.append(f"💳 موجودیت: {u['coins']:,} {CURRENCY_NAME}")
+    else:
+        lines.append("\n🏆 این کره‌خر فول‌لِوِله! 🦄")
+    lines.append(f"\n📛 تغییر اسم: بنویس `اسم کره‌خر {idx} اسم‌جدید`")
+    return "\n".join(lines)
+
+def baby_detail_keyboard(user_id, idx):
+    u = get_user(user_id)
+    babies = load_babies(u) if u else []
+    rows = []
+    if 1 <= idx <= len(babies) and babies[idx-1].get("level", 1) < BABY_MAX_LEVEL:
+        nxt = BABY_LEVELS[babies[idx-1].get("level", 1) + 1]
+        rows.append([InlineKeyboardButton(f"⬆️ ارتقا ({nxt['cost']:,} 🪙)", callback_data=f"babe_up_{idx}")])
+    rows.append([InlineKeyboardButton("🔙 پنل کره‌خرها", callback_data="babe_home")])
+    return InlineKeyboardMarkup(rows)
+
 def babies_list_text(user_id):
     u = get_user(user_id)
     if not u:
@@ -1400,8 +1481,9 @@ def main_menu():
         [InlineKeyboardButton("🎮 بازی‌ها", callback_data="games_list")],
         [InlineKeyboardButton("👤 پروفایل", callback_data="show_profile"), 
          InlineKeyboardButton("🏪 فروشگاه", callback_data="shop")],
-        [InlineKeyboardButton("🏆 جدول", callback_data="leaderboard"),
-         InlineKeyboardButton("📖 راهنما", callback_data="help_main")]
+        [InlineKeyboardButton("🐣 کره‌خرها", callback_data="babe_home"),
+         InlineKeyboardButton("🏆 جدول", callback_data="leaderboard")],
+        [InlineKeyboardButton("📖 راهنما", callback_data="help_main")]
     ])
 
 def games_menu():
@@ -3249,7 +3331,7 @@ HELP_SECTIONS = {
         "👤 `پروفایل` — مشخصات کامل (با ریپلی: پروفایل بقیه)\n"
         "❤️ `جفت‌گیری` یا `جفتگیری` (با ریپلی) — کره‌خر دار شو! (سطح ۲ لازمه، ۵۰۰ سکه)\n"
         "💌 طرف مقابل باید با دکمه «قبوله!» موافقت کنه وگرنه انجام نمی‌شه\n"
-        "🐣 `کره‌خرها` — لیست کره‌خرهات با سطح و سود روزانه\n"
+        "🐣 `کره‌خرها` — پنل کره‌خرها با دکمه: ارتقا، سود، تغییر اسم\n"
         "⬆️ `ارتقا کره‌خر 1` — ارتقا بده تا سود بیشتری بده (تا ۲۰۰۰ در روز!)\n"
         "📛 `اسم کره‌خر 1 فلفلی` — اسم دلخواه بذار\n"
         "💰 سود کره‌خرها خودکار همراه «روزانه» پرداخت می‌شه\n"
@@ -3622,9 +3704,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await rob_command(update, context)
         return
     
-    # ===== 🐣 کره‌خرها =====
-    if text in ["کره‌خرها", "کره خرها", "کره‌خر", "کره خر", "babies"]:
-        await update.message.reply_text(babies_list_text(user.id), parse_mode="Markdown")
+    # ===== 🐣 پنل کره‌خرها =====
+    if text in ["کره‌خرها", "کره خرها", "کره‌خر", "کره خر", "babies", "پنل کره‌خر", "پنل کره خر"]:
+        await reply_menu(update, baby_panel_text(user.id), baby_panel_keyboard(user.id))
         return
     
     parts_baby = text.split()
@@ -4294,6 +4376,54 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # ===== پروفایل =====
+    # ===== 🐣 پنل کره‌خرها =====
+    if data == "babe_home":
+        await query.edit_message_text(
+            baby_panel_text(user.id),
+            reply_markup=baby_panel_keyboard(user.id),
+            parse_mode="Markdown"
+        )
+        return
+    
+    if data.startswith("babe_view_"):
+        idx = int(data[10:])
+        detail = baby_detail_text(user.id, idx)
+        if not detail:
+            await query.answer("❌ این کره‌خر پیدا نشد!", show_alert=True)
+            return
+        await query.edit_message_text(
+            detail,
+            reply_markup=baby_detail_keyboard(user.id, idx),
+            parse_mode="Markdown"
+        )
+        return
+    
+    if data.startswith("babe_up_"):
+        idx = int(data[8:])
+        u = get_user(user.id)
+        babies = load_babies(u)
+        if idx < 1 or idx > len(babies):
+            await query.answer("❌ این کره‌خر پیدا نشد!", show_alert=True)
+            return
+        b = babies[idx - 1]
+        cur = b.get("level", 1)
+        if cur >= BABY_MAX_LEVEL:
+            await query.answer("🏆 فول‌لِوِله! بالاتر نداریم 🦄", show_alert=True)
+            return
+        nxt = BABY_LEVELS[cur + 1]
+        if not remove_coins(user.id, nxt["cost"]):
+            await query.answer(f"❌ {nxt['cost']:,} {CURRENCY_NAME} لازمه! موجودیت: {u['coins']:,}", show_alert=True)
+            return
+        b["level"] = cur + 1
+        save_babies(user.id, babies)
+        await query.answer(f"🎉 {b['name']} شد سطح {cur+1} ({nxt['name']})!", show_alert=True)
+        await query.edit_message_text(
+            baby_detail_text(user.id, idx),
+            reply_markup=baby_detail_keyboard(user.id, idx),
+            parse_mode="Markdown"
+        )
+        return
+    
     if data == "show_profile":
         await query.edit_message_text(
             profile_text(user.id),
