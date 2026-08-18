@@ -4467,7 +4467,7 @@ def main():
     
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT, message_handler))
-    app.add_handler(MessageHandler(filters.Dice.DICE, dice_roll_received))
+    app.add_handler(MessageHandler(filters.Dice.ALL, dice_roll_received))
     app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_error_handler(error_handler)
