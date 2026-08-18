@@ -99,6 +99,11 @@ def init_db():
                 chat_type TEXT DEFAULT '',
                 title TEXT DEFAULT '',
                 last_seen INTEGER DEFAULT 0)""")
+            
+            # ⚙️ تنظیمات (جوین اجباری و ...)
+            db.execute("""CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT DEFAULT '')""")
             db.commit()
             # مهاجرت: ستون‌های جدید (اگر دیتابیس قدیمی باشد)
             existing = {r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()}
@@ -128,6 +133,19 @@ def track_chat(chat):
             db.commit()
     except Exception as e:
         logger.warning(f"⚠️ خطا در ثبت چت: {e}")
+
+def get_setting(key, default=""):
+    try:
+        with closing(db_connect()) as db:
+            row = db.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            return row["value"] if row else default
+    except Exception:
+        return default
+
+def set_setting(key, value):
+    with closing(db_connect()) as db:
+        db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
+        db.commit()
 
 def ensure_user(user_id, name="کاربر"):
     now = int(time.time())
@@ -239,7 +257,7 @@ def profile_text(user_id):
     level = u["level"]
     title = get_title_by_level(level)
     donkey = get_donkey(user_id)
-    babies = json.loads(u["baby_names"]) if u["baby_names"] else []
+    babies = load_babies(u)
     
     equipped_parts = []
     if donkey:
@@ -266,9 +284,11 @@ def profile_text(user_id):
         msg += f"\n🎀 **وسایل فعال:** هیچ"
     
     if babies:
-        msg += f"\n👶 **کره‌خرها:** {len(babies)} عدد\n"
+        income = babies_daily_income(babies)
+        msg += f"\n👶 **کره‌خرها:** {len(babies)} عدد (سود روزانه: {income} {CURRENCY_NAME})\n"
         for i, baby in enumerate(babies[:3], 1):
-            msg += f"{i}. {baby}\n"
+            lv = BABY_LEVELS.get(baby.get("level", 1), BABY_LEVELS[1])
+            msg += f"{i}. {lv['emoji']} {esc_md(baby['name'])} (س{baby.get('level',1)})\n"
         if len(babies) > 3:
             msg += f"... و {len(babies)-3} عدد دیگر"
     else:
@@ -309,7 +329,15 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reward += extra
         bonus = f"\n🎉 **جایزه ویژه!** +{extra} {CURRENCY_NAME}"
     
-    add_coins(user.id, reward)
+    # 🐣 سود کره‌خرها — خودکار همراه جایزه روزانه
+    babies = load_babies(u)
+    baby_income = babies_daily_income(babies)
+    baby_line_txt = ""
+    if baby_income > 0:
+        baby_line_txt = f"\n🐣 سود کره‌خرها ({len(babies)} عدد): **+{baby_income}** {CURRENCY_NAME}"
+    
+    total = reward + baby_income
+    add_coins(user.id, total)
     with closing(db_connect()) as db:
         db.execute("UPDATE users SET last_daily = ? WHERE user_id = ?", (now, user.id))
         db.commit()
@@ -319,7 +347,9 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━\n"
         f"👤 {esc_md(user.first_name)} عزیز\n"
         f"💰 جایزه: **{reward}** {CURRENCY_NAME}"
-        f"{bonus}\n"
+        f"{bonus}"
+        f"{baby_line_txt}\n"
+        f"💎 جمع کل: **{total}** {CURRENCY_NAME}\n"
         f"\n📅 فردا دوباره بیا! 🐴",
         parse_mode="Markdown"
     )
@@ -328,19 +358,28 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # صدای خر
 # ============================================================
 
+# 💰 همه صداها امتیاز یکسان دارن: شانسی از ۵۰ تا ۵۰۰!
+SOUND_MIN = 50
+SOUND_MAX = 500
+SOUND_RARE_CHANCE = 0.07  # شانس عر طلایی
+
 SOUND_KEYWORDS = {
-    "عر":        {"sound": "عَر عَر عَر 🔊",                       "desc": "صدای معمولی خر",        "min": 1,  "max": 20, "rare": 0.05},
-    "عرعر":      {"sound": "عَرعَرعَرعَرعَر 📢",                    "desc": "رگبار عرعر",            "min": 3,  "max": 25, "rare": 0.06},
-    "عرر":       {"sound": "عَررررررررررر 🌬️",                    "desc": "عر کشیده و سوزناک",     "min": 3,  "max": 25, "rare": 0.06},
-    "ترک":       {"sound": "عَر-عَر-عَر... تِرِک! 💔",              "desc": "صدای شکسته و دلخراش",   "min": 5,  "max": 30, "rare": 0.07},
-    "تورک":      {"sound": "عَرررر بۆیله عَرررر 🌀",               "desc": "عر با لهجه تورکی",      "min": 5,  "max": 30, "rare": 0.07},
-    "عراپرا":    {"sound": "🎵 عَرا-پَرا عَرا-پَرا 🕺",             "desc": "عر ریتمیک رقصیدنی",     "min": 8,  "max": 35, "rare": 0.08},
-    "عرملایم":   {"sound": "عـِـر... عـِـر... 🎻",                  "desc": "عر رمانتیک زیر نور ماه", "min": 8,  "max": 35, "rare": 0.08},
-    "عرجنگی":    {"sound": "عَ‌ررررر!!! ⚔️🔥",                     "desc": "نعره جنگی خر وحشی",     "min": 10, "max": 40, "rare": 0.09},
-    "عراپرایی":  {"sound": "🎭 عَ‌ره‌ره‌ره‌ریرا~ 🎶",                "desc": "عر اپرایی سوپرانو",     "min": 12, "max": 45, "rare": 0.10},
-    "عرغمگین":   {"sound": "عـِـر... 😢💧",                        "desc": "عر غمگین بارونی",       "min": 10, "max": 40, "rare": 0.09},
-    "عرشاد":     {"sound": "عَر عَر هورااا! 🎉🥳",                  "desc": "عر جشن و پایکوبی",      "min": 10, "max": 40, "rare": 0.09},
-    "عرخفن":     {"sound": "😎 عَر. فقط همین. 🕶️",                "desc": "عر باکلاس و لاکچری",    "min": 15, "max": 50, "rare": 0.12}
+    "عر":         {"sound": "عَر عَر عَر 🔊",                       "desc": "صدای معمولی خر"},
+    "عرعر":       {"sound": "عَرعَرعَرعَرعَر 📢",                    "desc": "رگبار عرعر"},
+    "عرر":        {"sound": "عَررررررررررر 🌬️",                    "desc": "عر کشیده و سوزناک"},
+    "ترک":        {"sound": "عَر-عَر-عَر... تِرِک! 💔",              "desc": "صدای شکسته و دلخراش"},
+    "تورک":       {"sound": "عَرررر بۆیله عَرررر 🌀",               "desc": "عر با لهجه تورکی"},
+    "عراپرا":     {"sound": "🎵 عَرا-پَرا عَرا-پَرا 🕺",             "desc": "عر ریتمیک رقصیدنی"},
+    "عرملایم":    {"sound": "عـِـر... عـِـر... 🎻",                  "desc": "عر رمانتیک زیر نور ماه"},
+    "عرجنگی":     {"sound": "عَ‌ررررر!!! ⚔️🔥",                     "desc": "نعره جنگی خر وحشی"},
+    "عراپرایی":   {"sound": "🎭 عَ‌ره‌ره‌ره‌ریرا~ 🎶",                "desc": "عر اپرایی سوپرانو"},
+    "عرغمگین":    {"sound": "عـِـر... 😢💧",                        "desc": "عر غمگین بارونی"},
+    "عرشاد":      {"sound": "عَر عَر هورااا! 🎉🥳",                  "desc": "عر جشن و پایکوبی"},
+    "عرخفن":      {"sound": "😎 عَر. فقط همین. 🕶️",                "desc": "عر باکلاس و لاکچری"},
+    "عرتایید":    {"sound": "عَر! 👍✅",                            "desc": "مُهر تایید خر — یعنی آره، موافقم!"},
+    "عرمخالفت":   {"sound": "عَر عَر! 👎❌",                        "desc": "وتوی خری — یعنی نه، عمراً!"},
+    "عرلری":      {"sound": "عَر کاکو عَرررر! 🏔️💪",               "desc": "عر با لهجه غلیظ لری"},
+    "عرکنکوری":   {"sound": "عَر... عَر... 📚😰",                   "desc": "عر پراسترس شب کنکور"}
 }
 
 # رتبه‌های عرعرکردن بر اساس تعداد کل صداها
@@ -365,7 +404,7 @@ SOUND_COOLDOWN = 120
 
 async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    text = update.message.text.strip().replace(" ", "")
+    text = update.message.text.strip().replace(" ", "").replace("\u200c", "")
     ensure_user(user.id, user.first_name)
     u = get_user(user.id)
     if not u: return
@@ -393,11 +432,11 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     sound_info = SOUND_KEYWORDS[keyword]
-    reward = random.randint(sound_info["min"], sound_info["max"])
+    reward = random.randint(SOUND_MIN, SOUND_MAX)
     bonus = ""
     
-    if random.random() < sound_info["rare"]:
-        extra = random.randint(30, 80)
+    if random.random() < SOUND_RARE_CHANCE:
+        extra = random.randint(100, 300)
         reward += extra
         bonus = f"\n🌟 **عر طلایی!** پژواکش کل طویله رو لرزوند! +{extra} {CURRENCY_NAME}"
     
@@ -427,13 +466,14 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 SOUNDS_LIST_TEXT = (
-    "🔊 **لیست صداهای خر — هر کدوم پوینت خودش رو داره!**\n"
+    f"🔊 **لیست صداهای خر — همه شانسی {SOUND_MIN} تا {SOUND_MAX} {CURRENCY_NAME}!**\n"
     "━━━━━━━━━━━━━━\n" +
     "\n".join(
-        f"`{k}` — {v['desc']} ({v['min']}-{v['max']} 🪙)"
+        f"`{k}` — {v['desc']}"
         for k, v in SOUND_KEYWORDS.items()
     ) +
-    "\n\n🌟 هر صدا شانس **عر طلایی** داره (تا +80 اضافه!)\n"
+    f"\n\n🎲 هر عرعر یه قماره: بین **{SOUND_MIN}** تا **{SOUND_MAX}** {CURRENCY_NAME} شانسی!\n"
+    "🌟 شانس **عر طلایی** هم هست (تا +300 اضافه!)\n"
     "🏅 با عرعر بیشتر، رتبه‌ات بالا می‌ره:\n" +
     "\n".join(f"{name} — {need} عر" for need, name in SOUND_RANKS) +
     "\n\n⏳ هر ۲ دقیقه یک بار می‌تونی صدا بدی."
@@ -783,6 +823,123 @@ def donkey_art(user_id):
     return msg
 
 # ============================================================
+# 🐣 سیستم کره‌خر: سود روزانه + ارتقا + اسم‌گذاری
+# ============================================================
+
+# سطح: (اسم سطح، ایموجی، سود روزانه، هزینه ارتقا به این سطح)
+BABY_LEVELS = {
+    1: {"name": "نوزاد",   "emoji": "🐣", "income": 200,  "cost": 0},
+    2: {"name": "کوچولو",  "emoji": "🐤", "income": 400,  "cost": 1000},
+    3: {"name": "نوجوون",  "emoji": "🐥", "income": 800,  "cost": 3000},
+    4: {"name": "جوون",    "emoji": "🐴", "income": 1400, "cost": 8000},
+    5: {"name": "طلایی",   "emoji": "🦄", "income": 2000, "cost": 20000},
+}
+BABY_MAX_LEVEL = 5
+BABY_NAME_MAXLEN = 20
+
+def load_babies(u):
+    """خواندن کره‌خرها + مهاجرت خودکار از فرمت قدیمی (لیست رشته) به جدید (لیست دیکشنری)"""
+    try:
+        raw = json.loads(u["baby_names"]) if u["baby_names"] else []
+    except (json.JSONDecodeError, TypeError):
+        raw = []
+    babies = []
+    changed = False
+    for b in raw:
+        if isinstance(b, dict) and "name" in b:
+            b.setdefault("level", 1)
+            babies.append(b)
+        else:
+            # فرمت قدیمی: فقط اسم رشته‌ای
+            name = str(b).replace("🐣", "").strip() or "کره‌خر"
+            babies.append({"name": name[:BABY_NAME_MAXLEN], "level": 1})
+            changed = True
+    if changed:
+        save_babies(u["user_id"], babies)
+    return babies
+
+def save_babies(user_id, babies):
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET baby_names = ?, babies = ? WHERE user_id = ?",
+                  (json.dumps(babies, ensure_ascii=False), len(babies), user_id))
+        db.commit()
+
+def babies_daily_income(babies):
+    return sum(BABY_LEVELS.get(b.get("level", 1), BABY_LEVELS[1])["income"] for b in babies)
+
+def baby_line(i, b):
+    lv = BABY_LEVELS.get(b.get("level", 1), BABY_LEVELS[1])
+    return f"{i}. {lv['emoji']} **{esc_md(b['name'])}** — سطح {b.get('level',1)} ({lv['name']}) | سود روزانه: {lv['income']} {CURRENCY_NAME}"
+
+def babies_list_text(user_id):
+    u = get_user(user_id)
+    if not u:
+        return "❌ کاربر پیدا نشد."
+    babies = load_babies(u)
+    if not babies:
+        return ("🐣 **کره‌خرهات**\n━━━━━━━━━━━━━━\n"
+                "هنوز کره‌خری نداری! ❤️ با `جفت‌گیری` (ریپلی روی یه نفر) صاحب کره‌خر شو!\n"
+                f"💰 هر کره‌خر روزی {BABY_LEVELS[1]['income']} تا {BABY_LEVELS[BABY_MAX_LEVEL]['income']} {CURRENCY_NAME} سود می‌ده!")
+    lines = [f"🐣 **کره‌خرهای {esc_md(u['name'])}** ({len(babies)}/{MAX_BABIES})", "━━━━━━━━━━━━━━"]
+    for i, b in enumerate(babies, 1):
+        lines.append(baby_line(i, b))
+    total = babies_daily_income(babies)
+    lines.append(f"\n💰 جمع سود روزانه: **{total}** {CURRENCY_NAME} (خودکار با «روزانه»)")
+    lines.append("\n📋 دستورات:")
+    lines.append("`ارتقا کره‌خر 1` — ارتقای کره‌خر شماره ۱")
+    lines.append("`اسم کره‌خر 1 فلفلی` — تغییر اسم")
+    return "\n".join(lines)
+
+async def baby_upgrade_command(update, context, idx):
+    user = update.effective_user
+    u = get_user(user.id)
+    babies = load_babies(u)
+    if not babies:
+        await update.message.reply_text("❌ هنوز کره‌خری نداری! اول جفت‌گیری کن ❤️")
+        return
+    if idx < 1 or idx > len(babies):
+        await update.message.reply_text(f"❌ کره‌خر شماره {idx} نداری! (۱ تا {len(babies)}) — لیست: `کره‌خرها`", parse_mode="Markdown")
+        return
+    b = babies[idx - 1]
+    cur = b.get("level", 1)
+    if cur >= BABY_MAX_LEVEL:
+        await update.message.reply_text(f"🦄 **{esc_md(b['name'])}** الان فول‌لِوِله (طلایی)! بالاتر نداریم 😎", parse_mode="Markdown")
+        return
+    nxt = BABY_LEVELS[cur + 1]
+    if not remove_coins(user.id, nxt["cost"]):
+        await update.message.reply_text(
+            f"❌ برای ارتقای **{esc_md(b['name'])}** به سطح {cur+1} ({nxt['name']}) {nxt['cost']:,} {CURRENCY_NAME} لازمه!\n"
+            f"💳 موجودیت: {u['coins']:,}", parse_mode="Markdown")
+        return
+    b["level"] = cur + 1
+    save_babies(user.id, babies)
+    await update.message.reply_text(
+        f"🎉 **ارتقا موفق!**\n━━━━━━━━━━━━━━\n"
+        f"{nxt['emoji']} **{esc_md(b['name'])}** رسید به سطح **{cur+1} ({nxt['name']})**!\n"
+        f"💰 سود روزانه جدیدش: **{nxt['income']}** {CURRENCY_NAME}\n"
+        f"💸 هزینه: {nxt['cost']:,} {CURRENCY_NAME}", parse_mode="Markdown")
+
+async def baby_rename_command(update, context, idx, new_name):
+    user = update.effective_user
+    u = get_user(user.id)
+    babies = load_babies(u)
+    if not babies:
+        await update.message.reply_text("❌ هنوز کره‌خری نداری! اول جفت‌گیری کن ❤️")
+        return
+    if idx < 1 or idx > len(babies):
+        await update.message.reply_text(f"❌ کره‌خر شماره {idx} نداری! (۱ تا {len(babies)})")
+        return
+    new_name = new_name.strip()[:BABY_NAME_MAXLEN]
+    if not new_name:
+        await update.message.reply_text("❌ اسم خالیه! مثال: `اسم کره‌خر 1 فلفلی`", parse_mode="Markdown")
+        return
+    old = babies[idx - 1]["name"]
+    babies[idx - 1]["name"] = new_name
+    save_babies(user.id, babies)
+    await update.message.reply_text(
+        f"📛 اسم کره‌خر شماره {idx} از «{esc_md(old)}» شد: **{esc_md(new_name)}** 🎉", parse_mode="Markdown")
+
+# ============================================================
 # جفت‌گیری
 # ============================================================
 
@@ -808,8 +965,8 @@ def mate_check(user_id, user_name, target_id, target_name):
     if u2["coins"] < MATE_COST:
         return f"❌ {esc_md(target_name)} {MATE_COST} {CURRENCY_NAME} نداره! 💸"
     
-    babies1 = json.loads(u1["baby_names"]) if u1["baby_names"] else []
-    babies2 = json.loads(u2["baby_names"]) if u2["baby_names"] else []
+    babies1 = load_babies(u1)
+    babies2 = load_babies(u2)
     if len(babies1) >= MAX_BABIES:
         return f"❌ {esc_md(user_name)} دیگه جا برای کره‌خر جدید نداری! (حداکثر {MAX_BABIES})"
     if len(babies2) >= MAX_BABIES:
@@ -833,19 +990,19 @@ def mate_do(user_id, target_id):
     remove_coins(user_id, MATE_COST)
     remove_coins(target_id, MATE_COST)
     
-    baby_names = ["🐣 کره‌خر کوچولو", "🐣 کره‌خر نازنین", "🐣 کره‌خر خوشگل", "🐣 کره‌خر بازیگوش", "🐣 کره‌خر شیطون"]
+    baby_names = ["کوچولو", "نازنین", "خوشگل", "بازیگوش", "شیطون", "فسقلی", "پشمالو", "عرعرو"]
     baby_name = random.choice(baby_names)
     
-    babies1 = json.loads(u1["baby_names"]) if u1["baby_names"] else []
-    babies2 = json.loads(u2["baby_names"]) if u2["baby_names"] else []
-    babies1.append(baby_name)
-    babies2.append(baby_name)
+    babies1 = load_babies(u1)
+    babies2 = load_babies(u2)
+    babies1.append({"name": baby_name, "level": 1})
+    babies2.append({"name": baby_name, "level": 1})
     
     with closing(db_connect()) as db:
-        db.execute("UPDATE users SET baby_names = ?, babies = babies + 1, last_mate = ? WHERE user_id = ?",
-                  (json.dumps(babies1), now, user_id))
-        db.execute("UPDATE users SET baby_names = ?, babies = babies + 1, last_mate = ? WHERE user_id = ?",
-                  (json.dumps(babies2), now, target_id))
+        db.execute("UPDATE users SET baby_names = ?, babies = ?, last_mate = ? WHERE user_id = ?",
+                  (json.dumps(babies1, ensure_ascii=False), len(babies1), now, user_id))
+        db.execute("UPDATE users SET baby_names = ?, babies = ?, last_mate = ? WHERE user_id = ?",
+                  (json.dumps(babies2, ensure_ascii=False), len(babies2), now, target_id))
         db.commit()
     
     return (
@@ -853,9 +1010,11 @@ def mate_do(user_id, target_id):
         f"━━━━━━━━━━━━━━━━\n"
         f"👫 {uname(user_id)} ❤️ {uname(target_id)}\n\n"
         f"🐣 **کره‌خر متولد شد:** {baby_name}\n"
+        f"💰 سود روزانه‌ش: {BABY_LEVELS[1]['income']} {CURRENCY_NAME} (با «روزانه» خودکار می‌گیری)\n"
         f"👶 تعداد کره‌خرهای {uname(user_id)}: {len(babies1)}\n"
         f"👶 تعداد کره‌خرهای {uname(target_id)}: {len(babies2)}\n\n"
-        f"💸 هزینه: {MATE_COST} {CURRENCY_NAME} از هر نفر"
+        f"💸 هزینه: {MATE_COST} {CURRENCY_NAME} از هر نفر\n"
+        f"💡 با `کره‌خرها` مدیریتشون کن — اسم بذار و ارتقا بده!"
     )
 
 async def mate_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -980,7 +1139,12 @@ GAME_NAMES = {
     "dice": "🎲 تاس",
     "roulette": "🔫 رولت روسی",
     "coinflip": "🪙 شیر یا خط",
-    "hilo": "🔼🔽 حدس بالا/پایین"
+    "hilo": "🔼🔽 حدس بالا/پایین",
+    "darts": "🎯 دارت",
+    "bowling": "🎳 بولینگ",
+    "penalty": "⚽ پنالتی",
+    "guessnum": "🔢 حدس عدد",
+    "mines": "💣 مین‌روب"
 }
 
 GAME_MAX_PLAYERS = {
@@ -992,11 +1156,16 @@ GAME_MAX_PLAYERS = {
     "dice": 10,
     "roulette": 10,
     "coinflip": 2,
-    "hilo": 10
+    "hilo": 10,
+    "darts": 10,
+    "bowling": 10,
+    "penalty": 2,
+    "guessnum": 10,
+    "mines": 10
 }
 
 # بازی‌هایی که دقیقاً ۲ نفره هستند
-TWO_PLAYER_GAMES = {"rps", "ttt", "coinflip"}
+TWO_PLAYER_GAMES = {"rps", "ttt", "coinflip", "penalty"}
 
 # اسم فارسی بازی‌ها برای دستور متنی (مثلاً: انفجار 100)
 GAME_ALIASES = {
@@ -1014,7 +1183,14 @@ GAME_ALIASES = {
     "شیرخط": "coinflip",
     "شیر": "coinflip",
     "حدس": "hilo",
-    "بالاپایین": "hilo"
+    "بالاپایین": "hilo",
+    "دارت": "darts",
+    "بولینگ": "bowling",
+    "پنالتی": "penalty",
+    "حدس‌عدد": "guessnum",
+    "حدسعدد": "guessnum",
+    "مین": "mines",
+    "بمب": "mines"
 }
 
 # ============================================================
@@ -1132,10 +1308,15 @@ def cleanup_room(room_id: str):
         for p in room.players:
             if PLAYER_IN_GAME.get(p) == room_id:
                 PLAYER_IN_GAME.pop(p, None)
-        # پاکسازی صف انتظار تاس این چت
+        # پاکسازی صف‌های انتظار این چت
         try:
             if DICE_WAITING.get(room.chat_id) == room_id:
                 DICE_WAITING.pop(room.chat_id, None)
+        except NameError:
+            pass
+        try:
+            if GUESS_WAITING.get(room.chat_id) == room_id:
+                GUESS_WAITING.pop(room.chat_id, None)
         except NameError:
             pass
 
@@ -1450,10 +1631,14 @@ async def start_game(room: GameRoom, context: ContextTypes.DEFAULT_TYPE, query):
         await ttt_begin(room, context)
     elif gt == "coinflip":
         await coinflip_run(room, context)
-    elif gt == "dice":
-        await dice_begin(room, context)
+    elif gt in ("dice", "darts", "bowling", "penalty"):
+        await emoji_game_begin(room, context)
     elif gt == "roulette":
         await roulette_begin(room, context)
+    elif gt == "guessnum":
+        await guessnum_begin(room, context)
+    elif gt == "mines":
+        await mines_begin(room, context)
     elif gt == "poker":
         await poker_run(room, context)
     elif gt == "blackjack":
@@ -1725,66 +1910,92 @@ async def coinflip_run(room, context):
 # نگاشت اتاق‌های تاس منتظر پرتاب: {chat_id: room_id}
 DICE_WAITING = {}
 
-def dice_status_text(room):
+# ------------------------------------------------------------
+# 🎯🎳⚽ بازی‌های ایموجی (دارت، بولینگ، پنالتی) — مثل تاس
+# ------------------------------------------------------------
+
+EMOJI_OF_GAME = {"dice": "🎲", "darts": "🎯", "bowling": "🎳", "penalty": "⚽"}
+GAME_OF_EMOJI = {v: k for k, v in EMOJI_OF_GAME.items()}
+PENALTY_SHOTS = 3  # هر بازیکن ۳ ضربه
+
+def emoji_status_text(room):
     gd = room.game_data
-    lines = ["🎲 **بازی تاس — هر کی خودش می‌ندازه!**", "━━━━━━━━━━━━━━",
+    emo = EMOJI_OF_GAME[room.game_type]
+    lines = [f"{emo} **{GAME_NAMES[room.game_type]} — هر کی خودش می‌ندازه!**", "━━━━━━━━━━━━━━",
              f"💰 جایزه: {room.pot()} {CURRENCY_NAME}", ""]
-    for p in room.players:
-        if p in gd["rolls"]:
-            lines.append(f"✅ {uname(p)}: انداخت → **{gd['rolls'][p]}**")
-        else:
-            lines.append(f"⏳ {uname(p)}: منتظر پرتاب...")
-    lines.append("\n👆 ایموجی 🎲 رو از پنل ایموجی‌ها بفرست تا تاست ثبت بشه!")
-    lines.append("⏰ ۲ دقیقه وقت دارید — نندازی، بدون تاس حساب می‌شی (صفر)!")
+    if room.game_type == "penalty":
+        for p in room.players:
+            shots = gd["shots"].get(p, [])
+            goals = sum(1 for v in shots if v >= 3)
+            done = "✅" if len(shots) >= PENALTY_SHOTS else "⏳"
+            lines.append(f"{done} {uname(p)}: {len(shots)}/{PENALTY_SHOTS} ضربه — ⚽ {goals} گل")
+        lines.append(f"\n👆 ایموجی ⚽ رو بفرست ({PENALTY_SHOTS} بار)!")
+    else:
+        for p in room.players:
+            if p in gd["rolls"]:
+                lines.append(f"✅ {uname(p)}: انداخت → **{gd['rolls'][p]}**")
+            else:
+                lines.append(f"⏳ {uname(p)}: منتظر پرتاب...")
+        lines.append(f"\n👆 ایموجی {emo} رو از پنل ایموجی‌ها بفرست!")
+    lines.append("⏰ ۲ دقیقه وقت دارید — نندازی، صفر حساب می‌شی!")
     return "\n".join(lines)
 
-async def dice_begin(room, context):
-    """شروع بازی تاس: هر بازیکن خودش ایموجی 🎲 می‌فرسته و تلگرام عددش رو می‌ده"""
-    room.game_data = {"rolls": {}, "deadline": time.time() + 120}
-    # 🤖 خر بات همون اول تاسش رو می‌ندازه (تاس مجازی)
-    if BOT_ID in room.players:
-        room.game_data["rolls"][BOT_ID] = random.randint(1, 6)
+async def emoji_game_begin(room, context):
+    """شروع بازی ایموجی: تاس/دارت/بولینگ (تک‌پرتاب) و پنالتی (۳ ضربه)"""
+    if room.game_type == "penalty":
+        room.game_data = {"shots": {}, "deadline": time.time() + 120}
+        if BOT_ID in room.players:
+            room.game_data["shots"][BOT_ID] = [random.randint(1, 5) for _ in range(PENALTY_SHOTS)]
+    else:
+        room.game_data = {"rolls": {}, "deadline": time.time() + 120}
+        if BOT_ID in room.players:
+            room.game_data["rolls"][BOT_ID] = random.randint(1, 6)
     DICE_WAITING[room.chat_id] = room.room_id
-    await edit_room_msg(room, context, dice_status_text(room))
-    context.application.create_task(dice_deadline_watch(room, context))
+    await edit_room_msg(room, context, emoji_status_text(room))
+    context.application.create_task(emoji_game_deadline_watch(room, context))
 
-async def dice_deadline_watch(room, context):
-    """⏰ بعد از ۲ دقیقه، هر کی ننداخته صفر حساب می‌شه و نتیجه اعلام می‌شه"""
+async def emoji_game_deadline_watch(room, context):
     try:
         await asyncio.sleep(120)
         if ACTIVE_ROOMS.get(room.room_id) is not room or room.finished:
             return
-        await dice_finish(room, context)
+        await emoji_game_finish(room, context)
     except Exception as e:
-        logger.warning(f"⚠️ خطا در تایمر تاس: {e}")
+        logger.warning(f"⚠️ خطا در تایمر بازی ایموجی: {e}")
 
-async def dice_finish(room, context):
+async def emoji_game_finish(room, context):
     gd = room.game_data
     if DICE_WAITING.get(room.chat_id) == room.room_id:
         DICE_WAITING.pop(room.chat_id, None)
+    emo = EMOJI_OF_GAME[room.game_type]
     
-    rolls = gd["rolls"]
-    # هر کی ننداخته → صفر
-    for p in room.players:
-        rolls.setdefault(p, 0)
+    if room.game_type == "penalty":
+        scores = {}
+        for p in room.players:
+            shots = gd["shots"].get(p, [])
+            scores[p] = sum(1 for v in shots if v >= 3)  # ⚽ مقدار ۳ به بالا = گل
+        lines_detail = [f"{'🏆' if False else '▫️'}"]
+    else:
+        scores = {p: gd["rolls"].get(p, 0) for p in room.players}
     
-    best = max(rolls.values())
+    best = max(scores.values())
     if best == 0:
-        # هیچ‌کس ننداخت! شرط‌ها برگرده
         for p in room.players:
             add_coins(p, room.bet)
         await finish_game(room, context,
-            "🎲 **تاس — لغو شد!**\n━━━━━━━━━━━━━━\n"
-            "😴 هیچ‌کس تاس ننداخت! شرط همه برگشت داده شد.")
+            f"{emo} **{GAME_NAMES[room.game_type]} — لغو شد!**\n━━━━━━━━━━━━━━\n"
+            "😴 هیچ‌کس بازی نکرد! شرط همه برگشت داده شد.")
         return
     
-    winners = [p for p, v in rolls.items() if v == best]
-    dice_emoji = ["💤", "⚀", "⚁", "⚂", "⚃", "⚄", "⚅"]
+    winners = [p for p, v in scores.items() if v == best]
     lines = []
-    for p, v in sorted(rolls.items(), key=lambda x: -x[1]):
+    for p, v in sorted(scores.items(), key=lambda x: -x[1]):
         mark = "🏆" if p in winners else "▫️"
-        val = f"{dice_emoji[v]} = **{v}**" if v > 0 else "💤 ننداخت (صفر)"
-        lines.append(f"{mark} {uname(p)}: {val}")
+        if room.game_type == "penalty":
+            lines.append(f"{mark} {uname(p)}: ⚽ **{v}** گل از {PENALTY_SHOTS} ضربه")
+        else:
+            val = f"**{v}**" if v > 0 else "💤 ننداخت (صفر)"
+            lines.append(f"{mark} {uname(p)}: {val}")
     
     share = room.pot() // len(winners)
     for w in winners:
@@ -1795,17 +2006,18 @@ async def dice_finish(room, context):
             record_loss(p)
     
     win_names = "، ".join(uname(w) for w in winners)
+    result_note = "🤝 مساوی — تقسیم جایزه!\n" if len(winners) > 1 else ""
     await finish_game(room, context,
-        f"🎲 **تاس — نتیجه**\n━━━━━━━━━━━━━━\n" + "\n".join(lines) +
-        f"\n\n🏆 برنده: **{win_names}**\n💰 جایزه هر نفر: {share} {CURRENCY_NAME}")
+        f"{emo} **{GAME_NAMES[room.game_type]} — نتیجه**\n━━━━━━━━━━━━━━\n" + "\n".join(lines) +
+        f"\n\n{result_note}🏆 برنده: **{win_names}**\n💰 جایزه هر نفر: {share} {CURRENCY_NAME}")
 
 async def dice_roll_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """🎲 وقتی کسی توی گروه ایموجی تاس می‌فرسته — عددش از تلگرام خونده می‌شه"""
+    """🎲🎯🎳⚽ وقتی کسی ایموجی بازی می‌فرسته — عدد واقعی از تلگرام خونده می‌شه"""
     msg = update.message
     if not msg or not msg.dice or not update.effective_user:
         return
-    # فقط تاس واقعی 🎲 (نه دارت و بولینگ)
-    if msg.dice.emoji != "🎲":
+    game_of_emoji = GAME_OF_EMOJI.get(msg.dice.emoji)
+    if not game_of_emoji:
         return
     # فوروارد قبول نیست! (تقلب)
     if getattr(msg, "forward_origin", None) or getattr(msg, "forward_date", None):
@@ -1816,36 +2028,280 @@ async def dice_roll_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not room_id:
         return
     room = ACTIVE_ROOMS.get(room_id)
-    if not room or room.finished or room.game_type != "dice":
+    if not room or room.finished or room.game_type not in EMOJI_OF_GAME:
         DICE_WAITING.pop(chat_id, None)
+        return
+    # ایموجی باید با بازی همخونی داشته باشه (وسط بازی دارت، تاس نفرست!)
+    if room.game_type != game_of_emoji:
         return
     
     uid = update.effective_user.id
     gd = room.game_data
     if uid not in room.players:
-        return  # تماشاچی تاس انداخته، مهم نیست
+        return  # تماشاچی، مهم نیست
+    
+    room.last_action = time.time()
+    
+    if room.game_type == "penalty":
+        shots = gd["shots"].setdefault(uid, [])
+        if len(shots) >= PENALTY_SHOTS:
+            try:
+                await msg.reply_text(f"😅 هر {PENALTY_SHOTS} تا ضربه‌ات رو زدی!")
+            except Exception:
+                pass
+            return
+        shots.append(msg.dice.value)
+        all_done = all(len(gd["shots"].get(p, [])) >= PENALTY_SHOTS for p in room.players)
+        if all_done:
+            await asyncio.sleep(3.5)
+            if not room.finished:
+                await emoji_game_finish(room, context)
+        else:
+            await edit_room_msg(room, context, emoji_status_text(room))
+        return
+    
+    # تاس/دارت/بولینگ: تک پرتاب
     if uid in gd["rolls"]:
         try:
-            await msg.reply_text("😅 تاست رو قبلاً انداختی! همون اولی حسابه.")
+            await msg.reply_text("😅 قبلاً انداختی! همون اولی حسابه.")
         except Exception:
             pass
         return
     
-    # 🎲 عدد واقعی تاس تلگرام
     gd["rolls"][uid] = msg.dice.value
-    room.last_action = time.time()
     
-    # همه انداختن؟ → نتیجه (کمی صبر تا انیمیشن تاس تموم شه)
     if len(gd["rolls"]) == len(room.players):
         await asyncio.sleep(3.5)
         if not room.finished:
-            await dice_finish(room, context)
+            await emoji_game_finish(room, context)
     else:
-        await edit_room_msg(room, context, dice_status_text(room))
+        await edit_room_msg(room, context, emoji_status_text(room))
 
-async def dice_run(room, context):
-    """(نسخه قدیمی خودکار — دیگه استفاده نمی‌شه ولی برای سازگاری مونده)"""
-    await dice_begin(room, context)
+# ------------------------------------------------------------
+# 🔢 حدس عدد (۲ تا ۱۰ نفره) — عدد مخفی ۱ تا ۱۰۰
+# ------------------------------------------------------------
+
+GUESS_WAITING = {}  # {chat_id: room_id}
+
+async def guessnum_begin(room, context):
+    room.game_data = {"secret": random.randint(1, 100), "turn": 0, "history": [], "lo": 1, "hi": 100}
+    GUESS_WAITING[room.chat_id] = room.room_id
+    await edit_room_msg(room, context, guessnum_status(room))
+    await guessnum_bot_turn(room, context)
+
+def guessnum_status(room, extra=""):
+    gd = room.game_data
+    current = room.players[gd["turn"] % len(room.players)]
+    hist = " | ".join(gd["history"][-6:]) if gd["history"] else "هنوز حدسی زده نشده"
+    return (
+        f"🔢 **حدس عدد (۱ تا ۱۰۰)**\n━━━━━━━━━━━━━━\n"
+        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}\n"
+        f"🎯 بازه فعلی: **{gd['lo']} تا {gd['hi']}**\n"
+        f"📜 حدس‌ها: {hist}\n"
+        f"{extra}"
+        f"\n👉 نوبت: **{uname(current)}** — عددت رو توی چت بنویس!"
+    )
+
+async def guessnum_bot_turn(room, context):
+    """🤖 نوبت خر بات: حدس هوشمند وسط بازه"""
+    gd = room.game_data
+    while not room.finished and room.players[gd["turn"] % len(room.players)] == BOT_ID:
+        await asyncio.sleep(1.5)
+        if room.finished: return
+        guess = (gd["lo"] + gd["hi"]) // 2
+        done = await guessnum_process(room, context, BOT_ID, guess)
+        if done: return
+
+async def guessnum_process(room, context, uid, guess):
+    """پردازش یک حدس — True یعنی بازی تمام شد"""
+    gd = room.game_data
+    secret = gd["secret"]
+    room.last_action = time.time()
+    
+    if guess == secret:
+        GUESS_WAITING.pop(room.chat_id, None)
+        add_coins(uid, room.pot())
+        record_win(uid)
+        for p in room.players:
+            if p != uid:
+                record_loss(p)
+        gd["history"].append(f"{guess}✅")
+        await finish_game(room, context,
+            f"🔢 **حدس عدد — پایان!**\n━━━━━━━━━━━━━━\n"
+            f"🎉 عدد مخفی: **{secret}**\n"
+            f"🏆 {uname(uid)} درست حدس زد و **{room.pot()}** {CURRENCY_NAME} برد!\n"
+            f"📜 حدس‌ها: {' | '.join(gd['history'][-10:])}")
+        return True
+    
+    if guess < secret:
+        gd["lo"] = max(gd["lo"], guess + 1)
+        gd["history"].append(f"{guess}⬆️")
+        hint = f"⬆️ {uname(uid)} گفت {guess} — **بالاتره!**\n"
+    else:
+        gd["hi"] = min(gd["hi"], guess - 1)
+        gd["history"].append(f"{guess}⬇️")
+        hint = f"⬇️ {uname(uid)} گفت {guess} — **پایین‌تره!**\n"
+    
+    gd["turn"] += 1
+    await edit_room_msg(room, context, guessnum_status(room, hint))
+    await guessnum_bot_turn(room, context)
+    return False
+
+async def guessnum_text_received(update, context):
+    """پردازش عدد نوشته‌شده توی چت برای بازی حدس عدد — خروجی True یعنی پیام مصرف شد"""
+    chat_id = update.effective_chat.id
+    room_id = GUESS_WAITING.get(chat_id)
+    if not room_id:
+        return False
+    room = ACTIVE_ROOMS.get(room_id)
+    if not room or room.finished or room.game_type != "guessnum":
+        GUESS_WAITING.pop(chat_id, None)
+        return False
+    
+    uid = update.effective_user.id
+    if uid not in room.players:
+        return False
+    
+    text = update.message.text.strip().translate(FA_DIGITS)
+    if not text.isdigit():
+        return False
+    guess = int(text)
+    if guess < 1 or guess > 100:
+        return False
+    
+    gd = room.game_data
+    current = room.players[gd["turn"] % len(room.players)]
+    if uid != current:
+        try:
+            await update.message.reply_text(f"⏳ نوبت تو نیست! نوبت {uname(current)}ه.")
+        except Exception:
+            pass
+        return True
+    
+    await guessnum_process(room, context, uid, guess)
+    return True
+
+# ------------------------------------------------------------
+# 💣 مین‌روب (۲ تا ۱۰ نفره) — جعبه بمب‌دار رو باز نکن!
+# ------------------------------------------------------------
+
+MINES_BOXES = 9  # ۹ جعبه، هر راند یکیش بمبه
+
+def mines_keyboard(room):
+    gd = room.game_data
+    rows = []
+    for i in range(0, MINES_BOXES, 3):
+        row = []
+        for j in range(i, i + 3):
+            if j in gd["opened"]:
+                row.append(InlineKeyboardButton("✅", callback_data=gcb(room.room_id, f"mn_x{j}")))
+            else:
+                row.append(InlineKeyboardButton("📦", callback_data=gcb(room.room_id, f"mn_{j}")))
+        rows.append(row)
+    return InlineKeyboardMarkup(rows)
+
+def mines_status(room, extra=""):
+    gd = room.game_data
+    current = gd["alive"][gd["turn"] % len(gd["alive"])]
+    alive_names = "، ".join(uname(p) for p in gd["alive"])
+    return (
+        f"💣 **مین‌روب — راند {gd['round']}**\n━━━━━━━━━━━━━━\n"
+        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}\n"
+        f"❤️ زنده‌ها ({len(gd['alive'])}): {alive_names}\n"
+        f"{extra}"
+        f"\n📦 یکی از این جعبه‌ها **بمب** داره!\n"
+        f"👉 نوبت: **{uname(current)}** — یه جعبه باز کن... 😰"
+    )
+
+def mines_new_round(room):
+    gd = room.game_data
+    gd["bomb"] = random.randint(0, MINES_BOXES - 1)
+    gd["opened"] = set()
+
+async def mines_begin(room, context):
+    alive = room.players[:]
+    random.shuffle(alive)
+    room.game_data = {"alive": alive, "turn": 0, "round": 1}
+    mines_new_round(room)
+    await edit_room_msg(room, context, mines_status(room), mines_keyboard(room))
+    await mines_bot_turn(room, context)
+
+async def mines_bot_turn(room, context):
+    gd = room.game_data
+    while not room.finished and gd["alive"][gd["turn"] % len(gd["alive"])] == BOT_ID:
+        await asyncio.sleep(1.5)
+        if room.finished: return
+        choices = [i for i in range(MINES_BOXES) if i not in gd["opened"]]
+        if not choices: return
+        done = await mines_open(room, context, BOT_ID, random.choice(choices))
+        if done: return
+
+async def mines_open(room, context, uid, box):
+    """باز کردن جعبه — True یعنی بازی تمام شد"""
+    gd = room.game_data
+    room.last_action = time.time()
+    
+    if box == gd["bomb"]:
+        # 💥 بمب! حذف بازیکن
+        gd["alive"].remove(uid)
+        if len(gd["alive"]) == 1:
+            winner = gd["alive"][0]
+            add_coins(winner, room.pot())
+            record_win(winner)
+            for p in room.players:
+                if p != winner:
+                    record_loss(p)
+            await finish_game(room, context,
+                f"💣 **مین‌روب — پایان!**\n━━━━━━━━━━━━━━\n"
+                f"💥 **بوووم!** {uname(uid)} جعبه {box+1} رو باز کرد و منفجر شد! ☠️\n\n"
+                f"🏆 آخرین بازمانده: **{uname(winner)}**\n"
+                f"💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+            return True
+        # راند جدید
+        gd["round"] += 1
+        gd["turn"] = gd["turn"] % len(gd["alive"])
+        mines_new_round(room)
+        extra = f"💥 **بوووم!** {uname(uid)} منفجر شد و حذف شد! ☠️\n🔄 بمب جدید کار گذاشته شد...\n"
+        await edit_room_msg(room, context, mines_status(room, extra), mines_keyboard(room))
+        await mines_bot_turn(room, context)
+        return False
+    
+    # 📦 جعبه خالی
+    gd["opened"].add(box)
+    gd["turn"] += 1
+    # اگه فقط جعبه بمب مونده → راند جدید (همه نجات پیدا کردن این راند)
+    if len(gd["opened"]) >= MINES_BOXES - 1:
+        gd["round"] += 1
+        mines_new_round(room)
+        extra = f"😮‍💨 {uname(uid)} جعبه {box+1} رو باز کرد — خالی بود!\n🍀 همه جعبه‌های امن باز شدن! راند جدید با بمب جدید...\n"
+    else:
+        extra = f"😮‍💨 {uname(uid)} جعبه {box+1} رو باز کرد — خالی بود!\n"
+    await edit_room_msg(room, context, mines_status(room, extra), mines_keyboard(room))
+    await mines_bot_turn(room, context)
+    return False
+
+async def mines_action(room, context, query, payload):
+    gd = room.game_data
+    uid = query.from_user.id
+    
+    if payload.startswith("x"):
+        await query.answer("✅ این جعبه قبلاً باز شده!")
+        return
+    if uid not in gd["alive"]:
+        await query.answer("☠️ تو حذف شدی! فقط تماشا کن!", show_alert=True)
+        return
+    current = gd["alive"][gd["turn"] % len(gd["alive"])]
+    if uid != current:
+        await query.answer("⏳ نوبت تو نیست!", show_alert=True)
+        return
+    
+    box = int(payload)
+    if box in gd["opened"]:
+        await query.answer("✅ این جعبه قبلاً باز شده!")
+        return
+    
+    await query.answer("😰 داری بازش می‌کنی...")
+    await mines_open(room, context, uid, box)
 
 # ------------------------------------------------------------
 # 🔫 رولت روسی (۲ تا ۱۰ نفره)
@@ -2340,6 +2796,8 @@ async def game_action_router(update, context, query, data):
             await hilo_action(room, context, query, payload[5:])
         elif payload.startswith("rr_"):
             await roulette_action(room, context, query, payload[3:])
+        elif payload.startswith("mn_"):
+            await mines_action(room, context, query, payload[3:])
     except Exception as e:
         # 🛡️ خطای وسط بازی نباید بازی رو برای همیشه قفل کنه
         logger.error(f"❌ خطا وسط بازی {room.game_type} ({room.room_id}): {e}")
@@ -2639,12 +3097,14 @@ def export_db_json():
         users = [dict(r) for r in db.execute("SELECT * FROM users").fetchall()]
         donkeys = [dict(r) for r in db.execute("SELECT * FROM donkeys").fetchall()]
         chats = [dict(r) for r in db.execute("SELECT * FROM chats").fetchall()]
+        settings = [dict(r) for r in db.execute("SELECT * FROM settings").fetchall()]
     return {
         "version": 1,
         "exported_at": int(time.time()),
         "users": users,
         "donkeys": donkeys,
-        "chats": chats
+        "chats": chats,
+        "settings": settings
     }
 
 def import_db_json(data):
@@ -2680,6 +3140,11 @@ def import_db_json(data):
             db.execute(
                 "INSERT OR REPLACE INTO chats (chat_id, chat_type, title, last_seen) VALUES (?, ?, ?, ?)",
                 (ch["chat_id"], ch.get("chat_type", ""), ch.get("title", ""), ch.get("last_seen", 0)))
+        # ⚙️ تنظیمات (جوین اجباری و ...) هم برگردن
+        for st in data.get("settings", []):
+            if "key" not in st: continue
+            db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                      (st["key"], st.get("value", "")))
         db.commit()
     return count
 
@@ -2749,6 +3214,12 @@ HELP_SECTIONS = {
         "❌⭕ `دوز 100` — سه‌تا ردیف کن! (۲ نفره)\n"
         "✊ `سنگ 100` — سنگ‌کاغذقیچی (۲ نفره)\n"
         "🪙 `شیرخط 100` — شانس خالص! (۲ نفره)\n\n"
+        "🆕 **بازی‌های جدید:**\n"
+        "🎯 `دارت 100` — با ایموجی واقعی 🎯، بالاترین می‌بره (تا ۱۰ نفر)\n"
+        "🎳 `بولینگ 100` — با ایموجی واقعی 🎳، استرایک = ۶ (تا ۱۰ نفر)\n"
+        "⚽ `پنالتی 100` — ۳ ضربه با ایموجی ⚽، گل بیشتر = برد (۲ نفره)\n"
+        "🔢 `حدس‌عدد 100` — عدد مخفی ۱-۱۰۰، نوبتی حدس بزن! (تا ۱۰ نفر)\n"
+        "💣 `مین 100` — جعبه بمب‌دار رو باز نکن! حذفی (تا ۱۰ نفر)\n\n"
         "🎰 **بازی فوری تکی:**\n"
         "`اسلات 100` — سه‌تایی 7️⃣ = x20 جکپات!\n"
         "`دوبل 100` — شانس ۵۰-۵۰، دوبل یا هیچی!\n\n"
@@ -2778,6 +3249,10 @@ HELP_SECTIONS = {
         "👤 `پروفایل` — مشخصات کامل (با ریپلی: پروفایل بقیه)\n"
         "❤️ `جفت‌گیری` یا `جفتگیری` (با ریپلی) — کره‌خر دار شو! (سطح ۲ لازمه، ۵۰۰ سکه)\n"
         "💌 طرف مقابل باید با دکمه «قبوله!» موافقت کنه وگرنه انجام نمی‌شه\n"
+        "🐣 `کره‌خرها` — لیست کره‌خرهات با سطح و سود روزانه\n"
+        "⬆️ `ارتقا کره‌خر 1` — ارتقا بده تا سود بیشتری بده (تا ۲۰۰۰ در روز!)\n"
+        "📛 `اسم کره‌خر 1 فلفلی` — اسم دلخواه بذار\n"
+        "💰 سود کره‌خرها خودکار همراه «روزانه» پرداخت می‌شه\n"
         "⭐ با پول بیشتر، سطح و لقبت بالاتر می‌ره:\n"
         "🐣 کره‌خر تازه‌کار → ... → 👑 خدا خرها"
     ),
@@ -2814,7 +3289,9 @@ OWNER_HELP_TEXT = (
     "`بکاپ` — دریافت فایل بکاپ کامل دیتابیس 💾\n"
     "ارسال فایل بکاپ با کپشن `بازیابی` — برگرداندن دیتابیس 📥\n"
     "`سکه‌همگانی 500` — سکه به **همه** بازیکنان 🎊\n"
-    "`اطلاعیه متن...` — پیام به **همه** گروه‌ها و پی‌وی‌ها 📢\n\n"
+    "`اطلاعیه متن...` — پیام به **همه** گروه‌ها و پی‌وی‌ها 📢\n"
+    "`تنظیم کانال @X` / `تنظیم گروه @X` — اهداف جوین اجباری 🔒\n"
+    "`جوین اجباری روشن` / `خاموش` | `وضعیت جوین` 🔒\n\n"
     "**با ریپلی:**\n"
     "`+سکه 1000` — سکه دادن 💰\n"
     "`-سکه 1000` — کسر سکه 🔥\n"
@@ -2822,6 +3299,88 @@ OWNER_HELP_TEXT = (
     "`بن` / `انبن` — بن و آنبن 🚫\n\n"
     "🎁 **کادوها:** گل 🌹(100) | شکلات 🍫(250) | کیک 🎂(500) | خرس 🧸(1000) | گردنبند 📿(2500) | الماس 💎(5000) | ماشین 🚗(10000) | خونه 🏠(25000)"
 )
+
+# ============================================================
+# 🔒 جوین اجباری کانال + گروه
+# ============================================================
+
+# کش عضویت تاییدشده تا هر پیام یه API کال نزنه: {user_id: expire_ts}
+_MEMBER_CACHE = {}
+MEMBER_CACHE_TTL = 300  # ۵ دقیقه
+
+def force_join_enabled():
+    return get_setting("force_join", "off") == "on"
+
+def force_join_targets():
+    """لیست (نوع، آیدی/یوزرنیم) اهداف جوین اجباری"""
+    targets = []
+    ch = get_setting("fj_channel", "")
+    gp = get_setting("fj_group", "")
+    if ch: targets.append(("کانال", ch))
+    if gp: targets.append(("گروه", gp))
+    return targets
+
+def _fj_link(ident):
+    ident = ident.strip()
+    if ident.startswith("@"):
+        return f"https://t.me/{ident[1:]}"
+    if ident.startswith("https://"):
+        return ident
+    return None
+
+def force_join_keyboard():
+    rows = []
+    for label, ident in force_join_targets():
+        link = _fj_link(ident)
+        if link:
+            emoji = "📢" if label == "کانال" else "👥"
+            rows.append([InlineKeyboardButton(f"{emoji} عضویت در {label}", url=link)])
+    rows.append([InlineKeyboardButton("✅ عضو شدم — چک کن", callback_data="fj_check")])
+    return InlineKeyboardMarkup(rows)
+
+FORCE_JOIN_TEXT = (
+    "🔒 **برای استفاده از ربات اول عضو شو!**\n"
+    "━━━━━━━━━━━━━━\n"
+    "🐴 طویله خرستان فقط برای اعضای خانواده‌ست!\n"
+    "1️⃣ روی دکمه‌های زیر بزن و عضو شو\n"
+    "2️⃣ بعدش «✅ عضو شدم» رو بزن"
+)
+
+async def is_member_of_required(user_id, context):
+    """چک عضویت در همه اهداف — خطای دسترسی ربات = نادیده گرفتن اون هدف (تا ربات از کار نیفته)"""
+    now = time.time()
+    if _MEMBER_CACHE.get(user_id, 0) > now:
+        return True
+    
+    for label, ident in force_join_targets():
+        chat_ref = ident if ident.startswith("@") else ident
+        try:
+            member = await context.bot.get_chat_member(chat_ref, user_id)
+            if member.status in ("left", "kicked"):
+                return False
+        except Exception as e:
+            # ربات ادمین نیست یا کانال اشتباهه → این هدف رو نادیده بگیر و به لاگ هشدار بده
+            logger.warning(f"⚠️ جوین اجباری: نتونستم عضویت {label} ({ident}) رو چک کنم: {e}")
+            continue
+    
+    _MEMBER_CACHE[user_id] = now + MEMBER_CACHE_TTL
+    # جلوگیری از رشد بی‌نهایت کش
+    if len(_MEMBER_CACHE) > 2000:
+        for k in [k for k, v in _MEMBER_CACHE.items() if v < now][:500]:
+            _MEMBER_CACHE.pop(k, None)
+    return True
+
+async def force_join_gate(update, context, user_id):
+    """True یعنی کاربر مجازه؛ False یعنی پیام جوین فرستاده شد و باید متوقف بشیم"""
+    if not force_join_enabled() or user_id == OWNER_ID or not force_join_targets():
+        return True
+    if await is_member_of_required(user_id, context):
+        return True
+    try:
+        await update.message.reply_text(FORCE_JOIN_TEXT, reply_markup=force_join_keyboard(), parse_mode="Markdown")
+    except Exception:
+        pass
+    return False
 
 async def reply_menu(update, text, kb, parse_mode="Markdown"):
     """ارسال منو و ثبت مالکیتش — فقط بازکننده می‌تونه دکمه‌هاش رو بزنه"""
@@ -2845,6 +3404,14 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u_data = get_user(user.id)
     if u_data and u_data["is_banned"] == 1:
         await update.message.reply_text("🚫 شما بن شده‌اید!")
+        return
+    
+    # 🔒 جوین اجباری — بدون عضویت هیچ دستوری کار نمی‌کنه
+    if not await force_join_gate(update, context, user.id):
+        return
+    
+    # 🔢 عدد برای بازی حدس عدد فعال؟
+    if await guessnum_text_received(update, context):
         return
     
     # ===== شروع =====
@@ -2873,6 +3440,49 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "👑 **پنل مدیریت طویله**\n━━━━━━━━━━━━━━\nفقط برای اونر! انتخاب کن:",
             owner_panel_keyboard()
         )
+        return
+    
+    # ===== 🔒 تنظیمات جوین اجباری (فقط اونر) =====
+    parts_fj = text.split()
+    if parts_fj and parts_fj[0] in ["تنظیم"] and user.id == OWNER_ID and len(parts_fj) >= 2:
+        if parts_fj[1] == "کانال":
+            if len(parts_fj) < 3 or not parts_fj[2].startswith("@"):
+                await update.message.reply_text("📢 روش استفاده: `تنظیم کانال @MyChannel`\n(ربات باید توی کانال **ادمین** باشه!)", parse_mode="Markdown")
+                return
+            set_setting("fj_channel", parts_fj[2])
+            _MEMBER_CACHE.clear()
+            await update.message.reply_text(f"✅ کانال جوین اجباری ثبت شد: {parts_fj[2]}\n⚠️ یادت نره ربات رو توی کانال **ادمین** کنی!", parse_mode="Markdown")
+            return
+        if parts_fj[1] == "گروه":
+            if len(parts_fj) < 3 or not parts_fj[2].startswith("@"):
+                await update.message.reply_text("👥 روش استفاده: `تنظیم گروه @MyGroup`\n(گروه باید **یوزرنیم عمومی** داشته باشه و ربات عضوش باشه!)", parse_mode="Markdown")
+                return
+            set_setting("fj_group", parts_fj[2])
+            _MEMBER_CACHE.clear()
+            await update.message.reply_text(f"✅ گروه جوین اجباری ثبت شد: {parts_fj[2]}", parse_mode="Markdown")
+            return
+    
+    if text in ["جوین اجباری روشن", "جوین‌اجباری روشن"] and user.id == OWNER_ID:
+        if not force_join_targets():
+            await update.message.reply_text("❌ اول کانال یا گروه رو ثبت کن:\n`تنظیم کانال @MyChannel`\n`تنظیم گروه @MyGroup`", parse_mode="Markdown")
+            return
+        set_setting("force_join", "on")
+        _MEMBER_CACHE.clear()
+        await update.message.reply_text("🔒 جوین اجباری **روشن** شد! از الان فقط اعضا می‌تونن از ربات استفاده کنن.", parse_mode="Markdown")
+        return
+    if text in ["جوین اجباری خاموش", "جوین‌اجباری خاموش"] and user.id == OWNER_ID:
+        set_setting("force_join", "off")
+        await update.message.reply_text("🔓 جوین اجباری **خاموش** شد.", parse_mode="Markdown")
+        return
+    if text in ["وضعیت جوین", "وضعیت‌جوین"] and user.id == OWNER_ID:
+        status = "🔒 روشن" if force_join_enabled() else "🔓 خاموش"
+        ch = get_setting("fj_channel", "—")
+        gp = get_setting("fj_group", "—")
+        await update.message.reply_text(
+            f"⚙️ **وضعیت جوین اجباری**\n━━━━━━━━━━━━━━\n"
+            f"وضعیت: {status}\n📢 کانال: {ch or '—'}\n👥 گروه: {gp or '—'}\n\n"
+            f"دستورات:\n`تنظیم کانال @X` | `تنظیم گروه @X`\n`جوین اجباری روشن` | `جوین اجباری خاموش`",
+            parse_mode="Markdown")
         return
     
     # ===== 💰 سکه همگانی (فقط اونر): «سکه‌همگانی 500» =====
@@ -3012,6 +3622,29 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await rob_command(update, context)
         return
     
+    # ===== 🐣 کره‌خرها =====
+    if text in ["کره‌خرها", "کره خرها", "کره‌خر", "کره خر", "babies"]:
+        await update.message.reply_text(babies_list_text(user.id), parse_mode="Markdown")
+        return
+    
+    parts_baby = text.split()
+    if len(parts_baby) >= 2 and parts_baby[0] == "ارتقا" and parts_baby[1] in ["کره‌خر", "کره", "کره‌خرها"]:
+        idx_str = parts_baby[2].translate(FA_DIGITS) if len(parts_baby) > 2 else ""
+        if not idx_str.isdigit():
+            await update.message.reply_text("⬆️ روش استفاده: `ارتقا کره‌خر 1`", parse_mode="Markdown")
+            return
+        await baby_upgrade_command(update, context, int(idx_str))
+        return
+    
+    if len(parts_baby) >= 3 and parts_baby[0] == "اسم" and parts_baby[1] in ["کره‌خر", "کره"]:
+        idx_str = parts_baby[2].translate(FA_DIGITS)
+        if not idx_str.isdigit() or len(parts_baby) < 4:
+            await update.message.reply_text("📛 روش استفاده: `اسم کره‌خر 1 فلفلی`", parse_mode="Markdown")
+            return
+        new_name = " ".join(parts_baby[3:])
+        await baby_rename_command(update, context, int(idx_str), new_name)
+        return
+    
     # ===== نمایش خر =====
     if text in ["خرم", "خر من", "donkey"]:
         await update.message.reply_text(donkey_art(user.id), parse_mode="Markdown")
@@ -3147,7 +3780,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # ===== صدای خر =====
-    if text.replace(" ", "") in SOUND_KEYWORDS:
+    if text.replace(" ", "").replace("\u200c", "") in SOUND_KEYWORDS:
         await donkey_sound(update, context)
         return
     
@@ -3355,6 +3988,21 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== اکشن‌های داخل بازی (جواب query داخل خود اکشن داده می‌شود) =====
     if data.startswith("g|"):
         await game_action_router(update, context, query, data)
+        return
+    
+    # ===== ✅ چک عضویت جوین اجباری =====
+    if data == "fj_check":
+        _MEMBER_CACHE.pop(user.id, None)  # چک تازه
+        if not force_join_enabled() or await is_member_of_required(user.id, context):
+            await query.answer("🎉 خوش اومدی به طویله!", show_alert=True)
+            try:
+                await query.edit_message_text(
+                    "✅ **عضویتت تایید شد! خوش اومدی به طویله خرستان!** 🐴🎉\nحالا از همه امکانات می‌تونی استفاده کنی.",
+                    reply_markup=main_menu(), parse_mode="Markdown")
+            except Exception:
+                pass
+        else:
+            await query.answer("❌ هنوز عضو نشدی! اول جوین شو بعد این دکمه رو بزن.", show_alert=True)
         return
     
     # ===== 💌 جواب درخواست جفت‌گیری (فقط طرف مقابل) =====
