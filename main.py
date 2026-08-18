@@ -3452,16 +3452,77 @@ async def is_member_of_required(user_id, context):
             _MEMBER_CACHE.pop(k, None)
     return True
 
+# ⏱️ ضد اسپم پیام جوین: هر کاربر حداکثر هر ۹۰ ثانیه یه بار پیام جوین می‌بینه
+FJ_PROMPT_COOLDOWN = 90
+_FJ_LAST_PROMPT = {}
+
+# لیست دستورات متنی کامل ربات (برای تشخیص «آیا این پیام کار ربات است؟»)
+FJ_KNOWN_CMDS = {
+    "راهنما", "help", "/help", "کمک", "منو", "menu", "خانه",
+    "بازی", "بازی‌ها", "بازیها", "games", "فروشگاه", "شاپ", "shop",
+    "روزانه", "daily", "جایزه روزانه", "جفت‌گیری", "جفت گیری", "جفتگیری",
+    "پروفایل", "profile", "پروف", "سکه", "coins", "تی‌تاپ",
+    "جدول", "ج", "leaderboard", "top", "صداها", "صدا", "sounds",
+    "کار", "work", "کارکردن", "گردونه", "چرخ", "wheel",
+    "فال", "fortune", "طالع", "دزدی", "سرقت", "rob",
+    "خرم", "خر من", "donkey", "کره‌خرها", "کره خرها", "کره‌خر", "کره خر",
+    "babies", "پنل کره‌خر", "پنل کره خر",
+    "لغو بازی", "لغوبازی", "خروج از بازی", "cancelgame"
+}
+FJ_FIRST_WORD_CMDS = {"اسلات", "slot", "دوبل", "double", "انتقال", "transfer", "هدیه", "ارتقا", "اسم"}
+
+def looks_like_bot_command(update, context, text):
+    """تشخیص اینکه پیام، دستور ربات است یا چت عادی گروه"""
+    if not text:
+        return False
+    if text.startswith("/"):
+        return True
+    if text in FJ_KNOWN_CMDS:
+        return True
+    squeezed = text.replace(" ", "").replace("\u200c", "")
+    if squeezed in SOUND_KEYWORDS:
+        return True
+    parts = text.split()
+    if parts and (parts[0] in FJ_FIRST_WORD_CMDS or parts[0] in GAME_ALIASES):
+        return True
+    # عدد فقط وقتی ربات منتظرشه (شرط بازی یا حدس عدد)
+    norm = text.translate(FA_DIGITS)
+    if norm.isdigit():
+        if context.user_data.get("awaiting_bet"):
+            return True
+        try:
+            if GUESS_WAITING.get(update.effective_chat.id):
+                return True
+        except Exception:
+            pass
+    return False
+
 async def force_join_gate(update, context, user_id):
-    """True یعنی کاربر مجازه؛ False یعنی پیام جوین فرستاده شد و باید متوقف بشیم"""
+    """True یعنی ادامه بده؛ False یعنی کاربر بلاک شد"""
     if not force_join_enabled() or user_id == OWNER_ID or not force_join_targets():
         return True
+    
+    # 🔑 توی گروه فقط وقتی «دستور ربات» زده چک کن — به چت عادی مردم کاری نداریم!
+    text = (update.message.text or "").strip() if update.message and update.message.text else ""
+    chat = update.effective_chat
+    if chat and chat.type in ("group", "supergroup"):
+        if not looks_like_bot_command(update, context, text):
+            return True  # پیام عادی گروهه — بذار رد شه، ربات هم جوابی نمی‌ده
+    
     if await is_member_of_required(user_id, context):
         return True
-    try:
-        await update.message.reply_text(FORCE_JOIN_TEXT, reply_markup=force_join_keyboard(), parse_mode="Markdown")
-    except Exception:
-        pass
+    
+    # ⏱️ ضد اسپم: پیام جوین رو مدام تکرار نکن
+    now = time.time()
+    if now - _FJ_LAST_PROMPT.get(user_id, 0) >= FJ_PROMPT_COOLDOWN:
+        _FJ_LAST_PROMPT[user_id] = now
+        if len(_FJ_LAST_PROMPT) > 2000:
+            for k in [k for k, v in _FJ_LAST_PROMPT.items() if now - v > FJ_PROMPT_COOLDOWN][:500]:
+                _FJ_LAST_PROMPT.pop(k, None)
+        try:
+            await update.message.reply_text(FORCE_JOIN_TEXT, reply_markup=force_join_keyboard(), parse_mode="Markdown")
+        except Exception:
+            pass
     return False
 
 async def reply_menu(update, text, kb, parse_mode="Markdown"):
