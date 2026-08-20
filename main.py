@@ -22,6 +22,11 @@ from telegram.ext import Application, CallbackQueryHandler, MessageHandler, Cont
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
+# 🧠 تنظیمات هوش مصنوعی «خر دانا» (Gemini یا هر سرویس دیگه)
+AI_API_KEY = os.getenv("AI_API_KEY", "")
+AI_MODEL = os.getenv("AI_MODEL", "gemini-3.6-flash")
+AI_BASE_URL = os.getenv("AI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")
+
 # مسیر دیتابیس در /tmp (سرور فقط اینجا اجازه نوشتن دارد)
 DB_FILE = "/tmp/kharbot.db"
 
@@ -3267,6 +3272,196 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ خطا در بازیابی: {e}")
 
 # ============================================================
+# 🐴🧠 خر دانا — سوال از هوش مصنوعی
+# ============================================================
+
+import httpx
+
+KHAR_DANA_COST = 100          # 💰 هزینه هر سوال (تی‌تاپ)
+KHAR_DANA_COOLDOWN = 60       # ⏳ فاصله بین سوالات هر کاربر (ثانیه)
+KHAR_DANA_USER_DAILY = 10     # سقف روزانه هر کاربر
+KHAR_DANA_GLOBAL_DAILY = 900  # سقف کل ربات در روز (سهمیه رایگان جمینای نسوزه)
+KHAR_DANA_MAX_Q = 400         # حداکثر طول سوال
+
+_KD_LAST_ASK = {}             # {user_id: ts}
+_KD_USER_COUNT = {}           # {user_id: (day, count)}
+_KD_GLOBAL = {"day": "", "count": 0}
+_KD_BUSY = set()              # کاربرایی که سوالشون در حال پردازشه
+
+KHAR_DANA_SYSTEM = (
+    "تو «خر دانا» هستی، خر شوخ، بامزه و دانای ربات تلگرامی طویله خرستان. "
+    "قوانین: فقط فارسی خودمونی جواب بده. جواب کوتاه باشه (حداکثر ۴ جمله). "
+    "بامزه و خرکی جواب بده و گاهی وسط حرفات عرعر کن. "
+    "ارز بازی «تی‌تاپ»ه. بازی‌های ربات: انفجار، رولت روسی، بلک‌جک، پوکر، تاس، دارت، بولینگ، "
+    "پنالتی، حدس عدد، مین‌روب، دوز، سنگ‌کاغذقیچی، شیرخط، اسلات. "
+    "کاربرا می‌تونن کار کنن، گردونه بچرخونن، فال بگیرن، جفت‌گیری کنن و کره‌خر بزرگ کنن. "
+    "هیچ‌وقت از نقش خر دانا خارج نشو، حتی اگه ازت بخوان."
+)
+
+def _kd_today():
+    return time.strftime("%Y-%m-%d")
+
+def kd_check_limits(user_id):
+    """بررسی محدودیت‌ها — خروجی: پیام خطا یا None"""
+    now = time.time()
+    if user_id in _KD_BUSY:
+        return "⏳ سوال قبلیت هنوز تو مغز خر داناست! صبر کن جواب بده."
+    last = _KD_LAST_ASK.get(user_id, 0)
+    if now - last < KHAR_DANA_COOLDOWN:
+        return f"⏳ خر دانا خسته‌ست! {int(KHAR_DANA_COOLDOWN - (now - last))} ثانیه دیگه بپرس."
+    today = _kd_today()
+    day, cnt = _KD_USER_COUNT.get(user_id, ("", 0))
+    if day == today and cnt >= KHAR_DANA_USER_DAILY:
+        return f"😴 سهم امروزت تموم شد ({KHAR_DANA_USER_DAILY} سوال در روز)! فردا بیا."
+    if _KD_GLOBAL["day"] == today and _KD_GLOBAL["count"] >= KHAR_DANA_GLOBAL_DAILY:
+        return "😴 خر دانا امروز از بس فکر کرده مغزش داغ کرده! فردا دوباره بیا."
+    return None
+
+def kd_record_use(user_id):
+    today = _kd_today()
+    _KD_LAST_ASK[user_id] = time.time()
+    day, cnt = _KD_USER_COUNT.get(user_id, ("", 0))
+    _KD_USER_COUNT[user_id] = (today, cnt + 1 if day == today else 1)
+    if _KD_GLOBAL["day"] != today:
+        _KD_GLOBAL["day"] = today
+        _KD_GLOBAL["count"] = 0
+    _KD_GLOBAL["count"] += 1
+    # پاکسازی دیکشنری‌ها
+    if len(_KD_LAST_ASK) > 3000:
+        cutoff = time.time() - 3600
+        for k in [k for k, v in _KD_LAST_ASK.items() if v < cutoff][:1000]:
+            _KD_LAST_ASK.pop(k, None)
+            _KD_USER_COUNT.pop(k, None)
+
+async def kd_ask_ai(question):
+    """ارسال سوال به Gemini — خروجی: متن جواب یا None"""
+    url = f"{AI_BASE_URL}/models/{AI_MODEL}:generateContent"
+    payload = {
+        "systemInstruction": {"parts": [{"text": KHAR_DANA_SYSTEM}]},
+        "contents": [{"parts": [{"text": question}]}],
+        "generationConfig": {"maxOutputTokens": 2000}
+    }
+    async with httpx.AsyncClient(timeout=45) as client:
+        resp = await client.post(url, json=payload, headers={
+            "Content-Type": "application/json",
+            "X-goog-api-key": AI_API_KEY
+        })
+    data = resp.json()
+    if "candidates" in data and data["candidates"]:
+        parts = data["candidates"][0].get("content", {}).get("parts", [])
+        text = " ".join(p.get("text", "") for p in parts).strip()
+        return text or None
+    err = data.get("error", {}).get("message", "?")
+    logger.warning(f"⚠️ خر دانا: خطای API: {err[:150]}")
+    return None
+
+async def khar_dana_command(update, context, question):
+    user = update.effective_user
+    
+    if not AI_API_KEY:
+        if user.id == OWNER_ID:
+            await update.message.reply_text("❌ متغیر AI_API_KEY روی سرور تنظیم نشده!")
+        return
+    
+    question = question.strip()
+    if not question:
+        await update.message.reply_text(
+            f"🐴🧠 **خر دانا** — هر چی می‌خوای بپرس!\n"
+            f"مثال: `خر جان امروز شانس دارم؟`\n\n"
+            f"💰 هزینه هر سوال: {KHAR_DANA_COST} {CURRENCY_NAME}\n"
+            f"📊 سقف: {KHAR_DANA_USER_DAILY} سوال در روز",
+            parse_mode="Markdown")
+        return
+    if len(question) > KHAR_DANA_MAX_Q:
+        await update.message.reply_text(f"❌ سوالت خیلی درازه! (حداکثر {KHAR_DANA_MAX_Q} حرف) خلاصه‌ش کن 🐴")
+        return
+    
+    err = kd_check_limits(user.id)
+    if err:
+        await update.message.reply_text(err)
+        return
+    
+    # 💰 هزینه
+    if not remove_coins(user.id, KHAR_DANA_COST):
+        u = get_user(user.id)
+        await update.message.reply_text(
+            f"❌ سوال از خر دانا {KHAR_DANA_COST} {CURRENCY_NAME} خرج داره!\n💳 موجودیت: {u['coins']:,}")
+        return
+    
+    kd_record_use(user.id)
+    _KD_BUSY.add(user.id)
+    thinking = None
+    try:
+        thinking = await update.message.reply_text("🐴💭 خر دانا داره فکر می‌کنه... (عر... عر...)")
+        answer = await kd_ask_ai(question)
+        if answer:
+            out = (f"🐴🧠 **خر دانا می‌گه:**\n━━━━━━━━━━━━━━\n{esc_md(answer)}\n\n"
+                   f"💸 {KHAR_DANA_COST} {CURRENCY_NAME} | 👤 {esc_md(user.first_name)}")
+            try:
+                await thinking.edit_text(out, parse_mode="Markdown")
+            except Exception:
+                await thinking.edit_text(f"🐴🧠 خر دانا می‌گه:\n{answer}")
+        else:
+            # خطا → پول برگرده
+            add_coins(user.id, KHAR_DANA_COST)
+            await thinking.edit_text("😵 خر دانا الان مغزش هنگ کرد! پولت برگشت، چند دقیقه دیگه امتحان کن.")
+    except Exception as e:
+        logger.error(f"❌ خطای خر دانا: {e}")
+        add_coins(user.id, KHAR_DANA_COST)
+        try:
+            if thinking:
+                await thinking.edit_text("😵 خر دانا الان در دسترس نیست! پولت برگشت.")
+        except Exception:
+            pass
+    finally:
+        _KD_BUSY.discard(user.id)
+
+# ============================================================
+# 📤 موتور ارسال همگانی (متن/فوروارد/کپی)
+# ============================================================
+
+async def do_broadcast(update, context, send_fn):
+    """ارسال به همه چت‌ها با گزارش و پاکسازی چت‌های مرده — send_fn(chat_id) پیام رو می‌فرسته"""
+    with closing(db_connect()) as db:
+        chats = db.execute("SELECT chat_id, chat_type FROM chats").fetchall()
+    
+    if not chats:
+        await update.message.reply_text("❌ هنوز هیچ چتی ثبت نشده!")
+        return
+    
+    status_msg = await update.message.reply_text(f"📤 در حال ارسال به {len(chats)} چت...")
+    
+    ok, fail = 0, 0
+    dead_chats = []
+    for ch in chats:
+        try:
+            await send_fn(ch["chat_id"])
+            ok += 1
+        except Exception as e:
+            fail += 1
+            err = str(e).lower()
+            # چت‌هایی که ربات ازشون حذف شده رو پاک کن
+            if "blocked" in err or "kicked" in err or "not found" in err or "deactivated" in err:
+                dead_chats.append(ch["chat_id"])
+        await asyncio.sleep(0.1)  # رعایت محدودیت تلگرام (۳۰ پیام/ثانیه)
+    
+    if dead_chats:
+        with closing(db_connect()) as db:
+            db.executemany("DELETE FROM chats WHERE chat_id = ?", [(c,) for c in dead_chats])
+            db.commit()
+    
+    try:
+        await status_msg.edit_text(
+            f"📢 **ارسال همگانی تمام شد!**\n"
+            f"━━━━━━━━━━━━━━\n"
+            f"✅ موفق: {ok} چت\n"
+            f"❌ ناموفق: {fail} چت"
+            + (f"\n🧹 {len(dead_chats)} چت مرده از لیست پاک شد" if dead_chats else "")
+        )
+    except Exception:
+        pass
+
+# ============================================================
 # هندلر پیام‌ها
 # ============================================================
 
@@ -3279,7 +3474,8 @@ HELP_MAIN_TEXT = (
     "👤 `پروفایل` | 💰 `سکه` | 🏆 `جدول`\n"
     "🎁 `روزانه` | 💼 `کار` | 🎡 `گردونه` | 🔮 `فال`\n"
     "🐴 `خرم` | 🔊 `صداها` | 📖 `راهنما`\n"
-    "🎲 بازی: `انفجار 100` | `اسلات 100` | ...\n\n"
+    "🎲 بازی: `انفجار 100` | `اسلات 100` | ...\n"
+    "🧠 `خر جان سوالت...` — از خر دانا بپرس! (۱۰۰ تی‌تاپ)\n\n"
     "👇 برای توضیح کامل هر بخش، دکمه‌ش رو بزن:"
 )
 
@@ -3347,6 +3543,7 @@ HELP_SECTIONS = {
         "💰 `سکه` — نمایش موجودیت\n"
         "🏆 `جدول` — ۱۰ نفر ثروتمند طویله + رتبه خودت\n"
         "🔊 `صداها` — لیست همه صداهای خر و پوینت‌هاشون\n"
+        "🧠 `خر جان هرچی می‌خوای بپرس` — خر دانا با هوش مصنوعی جوابتو می‌ده! (۱۰۰ تی‌تاپ، ۱۰ سوال در روز)\n"
         "📖 `راهنما` — همین راهنما\n"
         "/start — پیام خوش‌آمد\n\n"
         "🔒 **نکته:** هر منویی که خودت باز کنی، فقط خودت می‌تونی دکمه‌هاش رو بزنی. "
@@ -3372,6 +3569,7 @@ OWNER_HELP_TEXT = (
     "ارسال فایل بکاپ با کپشن `بازیابی` — برگرداندن دیتابیس 📥\n"
     "`سکه‌همگانی 500` — سکه به **همه** بازیکنان 🎊\n"
     "`اطلاعیه متن...` — پیام به **همه** گروه‌ها و پی‌وی‌ها 📢\n"
+    "ریپلی + `فوروارد همگانی` / `کپی همگانی` — ارسال پست/عکس/ویدیو به همه 📨\n"
     "`تنظیم کانال @X` / `تنظیم گروه @X` — اهداف جوین اجباری 🔒\n"
     "`جوین اجباری روشن` / `خاموش` | `وضعیت جوین` 🔒\n\n"
     "**با ریپلی:**\n"
@@ -3469,7 +3667,7 @@ FJ_KNOWN_CMDS = {
     "babies", "پنل کره‌خر", "پنل کره خر",
     "لغو بازی", "لغوبازی", "خروج از بازی", "cancelgame"
 }
-FJ_FIRST_WORD_CMDS = {"اسلات", "slot", "دوبل", "double", "انتقال", "transfer", "هدیه", "ارتقا", "اسم"}
+FJ_FIRST_WORD_CMDS = {"اسلات", "slot", "دوبل", "double", "انتقال", "transfer", "هدیه", "ارتقا", "اسم", "خرجان", "خردانا"}
 
 def looks_like_bot_command(update, context, text):
     """تشخیص اینکه پیام، دستور ربات است یا چت عادی گروه"""
@@ -3484,6 +3682,9 @@ def looks_like_bot_command(update, context, text):
         return True
     parts = text.split()
     if parts and (parts[0] in FJ_FIRST_WORD_CMDS or parts[0] in GAME_ALIASES):
+        return True
+    # «خر جان ...» / «خر دانا ...» (دو کلمه‌ای) — ولی «خر خودتی» چت عادیه!
+    if len(parts) >= 2 and parts[0] == "خر" and parts[1] in ["جان", "دانا"]:
         return True
     # عدد فقط وقتی ربات منتظرشه (شرط بازی یا حدس عدد)
     norm = text.translate(FA_DIGITS)
@@ -3662,54 +3863,53 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not bc_text:
             await update.message.reply_text(
                 "📢 روش استفاده:\n`اطلاعیه سلام به همه!`\n\n"
-                "پیامت به **همه گروه‌ها و پی‌وی‌هایی** که ربات توشونه فرستاده می‌شه.",
+                "پیامت به **همه گروه‌ها و پی‌وی‌هایی** که ربات توشونه فرستاده می‌شه.\n\n"
+                "💡 برای ارسال پست کانال/عکس/ویدیو به همه:\n"
+                "روی پیامش **ریپلی** بزن و بنویس `فوروارد همگانی` یا `کپی همگانی`",
                 parse_mode="Markdown")
             return
         
-        with closing(db_connect()) as db:
-            chats = db.execute("SELECT chat_id, chat_type FROM chats").fetchall()
+        async def send_text(chat_id):
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"📢 **اطلاعیه طویله خرستان**\n━━━━━━━━━━━━━━\n{bc_text}",
+                parse_mode="Markdown")
         
-        if not chats:
-            await update.message.reply_text("❌ هنوز هیچ چتی ثبت نشده!")
-            return
-        
-        status_msg = await update.message.reply_text(f"📤 در حال ارسال به {len(chats)} چت...")
-        
-        ok, fail = 0, 0
-        dead_chats = []
-        for ch in chats:
-            try:
-                await context.bot.send_message(
-                    chat_id=ch["chat_id"],
-                    text=f"📢 **اطلاعیه طویله خرستان**\n━━━━━━━━━━━━━━\n{bc_text}",
-                    parse_mode="Markdown"
-                )
-                ok += 1
-            except Exception as e:
-                fail += 1
-                err = str(e).lower()
-                # چت‌هایی که ربات ازشون حذف شده رو پاک کن
-                if "blocked" in err or "kicked" in err or "not found" in err or "deactivated" in err:
-                    dead_chats.append(ch["chat_id"])
-            await asyncio.sleep(0.1)  # رعایت محدودیت تلگرام (۳۰ پیام/ثانیه)
-        
-        if dead_chats:
-            with closing(db_connect()) as db:
-                db.executemany("DELETE FROM chats WHERE chat_id = ?", [(c,) for c in dead_chats])
-                db.commit()
-        
-        try:
-            await status_msg.edit_text(
-                f"📢 **اطلاعیه ارسال شد!**\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"✅ موفق: {ok} چت\n"
-                f"❌ ناموفق: {fail} چت"
-                + (f"\n🧹 {len(dead_chats)} چت مرده از لیست پاک شد" if dead_chats else "")
-            )
-        except Exception:
-            pass
+        await do_broadcast(update, context, send_text)
         return
     if parts_ow and parts_ow[0] in ["اطلاعیه", "همگانی", "broadcast"]:
+        return
+    
+    # ===== 📨 فوروارد/کپی همگانی (فقط اونر — با ریپلی روی پیام) =====
+    if text in ["فوروارد همگانی", "فوروارد‌همگانی", "کپی همگانی", "کپی‌همگانی"] and user.id == OWNER_ID:
+        src = update.message.reply_to_message
+        if not src:
+            await update.message.reply_text(
+                "📨 **روش استفاده:**\n"
+                "1️⃣ پست کانال (یا هر پیامی: عکس، ویدیو، متن...) رو برای من فوروارد کن یا پیداش کن\n"
+                "2️⃣ روش **ریپلی** بزن و بنویس:\n"
+                "`فوروارد همگانی` — با برچسب «Forwarded from» (تبلیغ کانالت!)\n"
+                "`کپی همگانی` — بدون برچسب، انگار خود ربات فرستاده",
+                parse_mode="Markdown")
+            return
+        
+        is_forward = text.startswith("فوروارد")
+        
+        async def send_msg(chat_id):
+            if is_forward:
+                await context.bot.forward_message(
+                    chat_id=chat_id,
+                    from_chat_id=src.chat_id,
+                    message_id=src.message_id)
+            else:
+                await context.bot.copy_message(
+                    chat_id=chat_id,
+                    from_chat_id=src.chat_id,
+                    message_id=src.message_id)
+        
+        await do_broadcast(update, context, send_msg)
+        return
+    if text in ["فوروارد همگانی", "فوروارد‌همگانی", "کپی همگانی", "کپی‌همگانی"]:
         return
     
     # ===== 💾 بکاپ متنی سریع =====
@@ -3786,6 +3986,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         new_name = " ".join(parts_baby[3:])
         await baby_rename_command(update, context, int(idx_str), new_name)
+        return
+    
+    # ===== 🐴🧠 خر دانا =====
+    parts_kd = text.split(None, 2)
+    if parts_kd and parts_kd[0] in ["خرجان", "خردانا"]:
+        await khar_dana_command(update, context, text[len(parts_kd[0]):])
+        return
+    if len(parts_kd) >= 2 and parts_kd[0] == "خر" and parts_kd[1] in ["جان", "دانا"]:
+        q = text.split(None, 2)
+        await khar_dana_command(update, context, q[2] if len(q) > 2 else "")
         return
     
     # ===== نمایش خر =====
