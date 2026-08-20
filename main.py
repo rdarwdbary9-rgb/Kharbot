@@ -30,8 +30,8 @@ AI_BASE_URL = os.getenv("AI_BASE_URL", "https://generativelanguage.googleapis.co
 # مسیر دیتابیس در /tmp (سرور فقط اینجا اجازه نوشتن دارد)
 DB_FILE = "/tmp/kharbot.db"
 
-MIN_BET = 10
-START_COINS = 2500
+MIN_BET = 50
+START_COINS = 5000
 MAX_PLAYERS = 10
 
 CURRENCY_NAME = "تی‌تاپ"
@@ -109,6 +109,7 @@ def init_db():
             db.execute("""CREATE TABLE IF NOT EXISTS settings (
                 key TEXT PRIMARY KEY,
                 value TEXT DEFAULT '')""")
+            
             db.commit()
             # مهاجرت: ستون‌های جدید (اگر دیتابیس قدیمی باشد)
             existing = {r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()}
@@ -220,19 +221,20 @@ def record_loss(user_id, lost=0):
         return 0
 
 def update_level(user_id):
+    """⭐ سطح بر اساس ثروت کل (جیب + بانک) — متناسب با اقتصاد جدید"""
     with closing(db_connect()) as db:
-        row = db.execute("SELECT coins FROM users WHERE user_id = ?", (user_id,)).fetchone()
+        row = db.execute("SELECT coins, COALESCE(bank_balance,0) as bank FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if not row: return
-        coins = row["coins"]
-        if coins < 5000: level = 1
-        elif coins < 15000: level = 2
-        elif coins < 30000: level = 3
-        elif coins < 60000: level = 4
-        elif coins < 100000: level = 5
-        elif coins < 200000: level = 6
-        elif coins < 500000: level = 7
-        elif coins < 1000000: level = 8
-        elif coins < 5000000: level = 9
+        wealth = (row["coins"] or 0) + (row["bank"] or 0)
+        if wealth < 15000: level = 1
+        elif wealth < 35000: level = 2
+        elif wealth < 75000: level = 3
+        elif wealth < 150000: level = 4
+        elif wealth < 300000: level = 5
+        elif wealth < 600000: level = 6
+        elif wealth < 1200000: level = 7
+        elif wealth < 2500000: level = 8
+        elif wealth < 6000000: level = 9
         else: level = 10
         db.execute("UPDATE users SET level = ? WHERE user_id = ?", (level, user_id))
         db.commit()
@@ -411,7 +413,7 @@ def get_sound_rank(count):
             rank = name
     return rank
 
-SOUND_COOLDOWN = 120
+SOUND_COOLDOWN = 300
 
 async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -481,7 +483,7 @@ SOUNDS_LIST_TEXT = (
     "🌟 شانس **عر طلایی** هم هست (تا +300 اضافه!)\n"
     "🏅 با عرعر بیشتر، رتبه‌ات بالا می‌ره:\n" +
     "\n".join(f"{name} — {need} عر" for need, name in SOUND_RANKS) +
-    "\n\n⏳ هر ۲ دقیقه یک بار می‌تونی صدا بدی."
+    "\n\n⏳ هر ۵ دقیقه یک بار می‌تونی صدا بدی."
 )
 
 # ============================================================
@@ -653,7 +655,7 @@ async def rob_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"🚔 پلیس طویله دنبالته! {remaining // 60} دقیقه صبر کن!")
         return
     
-    if t["coins"] < 100:
+    if t["coins"] < 500:
         await update.message.reply_text(f"😅 {esc_md(target.first_name)} انقدر فقیره که چیزی برای دزدیدن نداره!")
         return
     
@@ -673,7 +675,7 @@ async def rob_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if random.random() < ROB_SUCCESS_CHANCE:
         # موفق: ۳ تا ۱۰ درصد پول هدف
         loot = max(10, int(t["coins"] * random.uniform(0.03, 0.10)))
-        loot = min(loot, 2000)  # سقف دزدی
+        loot = min(loot, 6000)  # سقف دزدی
         with closing(db_connect()) as db:
             db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (loot, target.id))
             db.commit()
@@ -687,7 +689,7 @@ async def rob_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     else:
         fine = max(20, int(u["coins"] * ROB_FINE_PERCENT))
-        fine = min(fine, 1000)
+        fine = min(fine, 3000)
         with closing(db_connect()) as db:
             db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (fine, user.id))
             db.commit()
@@ -750,8 +752,9 @@ async def fortune_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # انتقال سکه بین کاربران
 # ============================================================
 
-TRANSFER_MIN = 10
-TRANSFER_MAX = 50000
+TRANSFER_MIN = 50
+TRANSFER_MAX = 100000
+TRANSFER_TAX = 0.10   # 💸 ۱۰٪ مالیات انتقال
 
 def find_user_by_ref(ref):
     """پیدا کردن کاربر با آیدی عددی یا یوزرنیم/اسم — خروجی: ردیف کاربر یا None"""
@@ -821,11 +824,15 @@ async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE, a
         await update.message.reply_text(f"❌ موجودی کافی نداری! داری: {u['coins']:,} {CURRENCY_NAME}")
         return
     
-    add_coins(target_id, amount)
+    tax = int(amount * TRANSFER_TAX)
+    received = amount - tax
+    add_coins(target_id, received)
     await update.message.reply_text(
         f"💸 **انتقال موفق!**\n━━━━━━━━━━━━━━\n"
         f"👤 {esc_md(user.first_name)} ⬅️ {esc_md(target_name)}\n"
-        f"💰 مبلغ: **{amount:,}** {CURRENCY_NAME}\n\n"
+        f"💰 مبلغ ارسالی: {amount:,} {CURRENCY_NAME}\n"
+        f"🧾 مالیات انتقال ({int(TRANSFER_TAX*100)}٪): -{tax:,}\n"
+        f"✅ رسید به دستش: **{received:,}** {CURRENCY_NAME}\n\n"
         f"🤝 دمت گرم، رفاقت یعنی این!",
         parse_mode="Markdown"
     )
@@ -835,7 +842,8 @@ async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE, a
 # ============================================================
 
 BANK_INTEREST = 0.30        # ۳۰٪ سود روزانه
-BANK_MIN_DEPOSIT = 100
+BANK_INTEREST_CAP = 20000   # 🧢 سقف سود روزانه — رو سپرده‌های نجومی ترمز
+BANK_MIN_DEPOSIT = 500
 BANK_MAX_BALANCE = 500000   # سقف حساب (که اقتصاد منفجر نشه)
 
 def bank_pending_interest(user_id):
@@ -856,7 +864,7 @@ def bank_pending_interest(user_id):
     if now - last < 86400:
         return 0, False
     # ⚠️ فقط سود یک روز — دیر بیای، سود روزهای قبل سوخته!
-    return int(balance * BANK_INTEREST), True
+    return min(int(balance * BANK_INTEREST), BANK_INTEREST_CAP), True
 
 def bank_apply_interest(user_id):
     """(سازگاری با کد قدیمی) — دیگه خودکار واریز نمی‌کنه، فقط صفر برمی‌گردونه"""
@@ -879,7 +887,7 @@ async def bank_claim_interest(update, context):
         h, mnt = remaining // 3600, (remaining % 3600) // 60
         await update.message.reply_text(
             f"⏳ سودت هنوز نرسیده! {h} ساعت و {mnt} دقیقه دیگه بیا.\n"
-            f"💹 سود فردا: ~{int(balance * BANK_INTEREST):,} {CURRENCY_NAME}")
+            f"💹 سود فردا: ~{min(int(balance * BANK_INTEREST), BANK_INTEREST_CAP):,} {CURRENCY_NAME}")
         return
     add_coins(user.id, interest)
     with closing(db_connect()) as db:
@@ -976,10 +984,10 @@ async def bank_withdraw(update, context, amount_str):
 # 💳 وام بانکی — تا ۱۰هزار، فقط برای فقرا، با ضامن سطح ۲+
 # ============================================================
 
-LOAN_MAX = 10000
-LOAN_NEED_BELOW = 5000      # فقط وقتی پول نقد زیر این باشه وام می‌دن
+LOAN_MAX = 30000
+LOAN_NEED_BELOW = 15000      # فقط وقتی پول نقد زیر این باشه وام می‌دن
 LOAN_GUARANTOR_LEVEL = 2    # حداقل سطح ضامن
-LOAN_MIN = 500
+LOAN_MIN = 1000
 LOAN_DAYS = 10              # 📅 بازپرداخت در ۱۰ قسط روزانه خودکار
 
 # درخواست‌های وام منتظر تایید ضامن: {(chat_id, msg_id): {...}}
@@ -1236,7 +1244,7 @@ def bank_panel_text(user_id):
             msg += f"💹 سود آماده برداشت: **+{interest:,}** — دکمه رو بزن! 🎉\n"
         else:
             remaining = 86400 - (now - last)
-            msg += f"⏳ سود بعدی ({int(BANK_INTEREST*100)}٪ = {int(balance*BANK_INTEREST):,}) تا {remaining//3600} ساعت و {(remaining%3600)//60} دقیقه دیگه\n"
+            msg += f"⏳ سود بعدی ({int(BANK_INTEREST*100)}٪ = {min(int(balance*BANK_INTEREST), BANK_INTEREST_CAP):,}) تا {remaining//3600} ساعت و {(remaining%3600)//60} دقیقه دیگه\n"
     if debt > 0:
         msg += (f"\n💳 **بدهی وام:** {debt:,} {CURRENCY_NAME}\n"
                 f"📅 قسط خودکار: روزی {installment:,} — نداشته باشی از ضامن ({uname(guarantor)}) کم می‌شه! 😈\n")
@@ -1277,14 +1285,98 @@ def insurance_panel_text(user_id):
     )
     return msg
 
+
+# ============================================================
+# 🆘 گدایی — تور نجات ورشکسته‌ها (هیچکس صفر نمی‌مونه!)
+# ============================================================
+
+BEG_THRESHOLD = 1000       # فقط وقتی ثروت کل زیر این باشه
+BEG_COOLDOWN = 14400       # هر ۴ ساعت
+BEG_MIN, BEG_MAX = 500, 1500
+
+BEG_STORIES = [
+    "کنار طویله نشستی و کاسه گرفتی... مردم دلشون سوخت! 🥺",
+    "یه عر سوزناک کشیدی، رهگذرا اشکشون دراومد! 😢",
+    "با چشمای خرگوشی (خری!) به مردم نگاه کردی... 🥹",
+    "تابلو گرفتی: «خر بی‌یونجه، کمک کنید» 📋",
+]
+
+async def beg_command(update, context):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    u = get_user(user.id)
+    wealth = (u["coins"] or 0) + (u["bank_balance"] or 0)
+    if wealth >= BEG_THRESHOLD:
+        await update.message.reply_text(
+            f"😒 با {wealth:,} {CURRENCY_NAME} اومدی گدایی؟! برو کار کن!\n"
+            f"(گدایی فقط برای ثروت زیر {BEG_THRESHOLD:,})")
+        return
+    last = int(get_setting(f"beg_{user.id}", "0") or 0)
+    now = int(time.time())
+    if now - last < BEG_COOLDOWN:
+        remaining = BEG_COOLDOWN - (now - last)
+        await update.message.reply_text(
+            f"⏳ تازه گدایی کردی! {remaining//3600} ساعت و {(remaining%3600)//60} دقیقه دیگه بیا.")
+        return
+    amount = random.randint(BEG_MIN, BEG_MAX)
+    add_coins(user.id, amount)
+    set_setting(f"beg_{user.id}", str(now))
+    await update.message.reply_text(
+        f"🆘 **گدایی موفق!**\n━━━━━━━━━━━━━━\n"
+        f"{random.choice(BEG_STORIES)}\n\n"
+        f"💰 مردم بهت {amount:,} {CURRENCY_NAME} دادن!\n"
+        f"💪 حالا پاشو برو `کار` کن، گدایی که زندگی نشد!",
+        parse_mode="Markdown")
+
+# ============================================================
+# 💸 مالیات ثروت — «هزینه نگهداری طویله» برای خیلی‌پولدارها
+# ============================================================
+
+WEALTH_TAX_THRESHOLD = 500000   # بالای این ثروت (جیب+بانک) مالیات می‌خوره
+WEALTH_TAX_RATE = 0.02          # روزی ۲٪ از «مازاد»
+
+def collect_wealth_tax(user_id):
+    """💸 روزی یه بار موقع فعالیت — خروجی: مبلغ مالیات یا 0"""
+    try:
+        u = get_user(user_id)
+        if not u: return 0
+        wealth = (u["coins"] or 0) + (u["bank_balance"] or 0)
+        if wealth <= WEALTH_TAX_THRESHOLD:
+            return 0
+        last = int(get_setting(f"tax_{user_id}", "0") or 0)
+        now = int(time.time())
+        if not last:
+            set_setting(f"tax_{user_id}", str(now))
+            return 0
+        if now - last < 86400:
+            return 0
+        tax = int((wealth - WEALTH_TAX_THRESHOLD) * WEALTH_TAX_RATE)
+        if tax <= 0:
+            set_setting(f"tax_{user_id}", str(now))
+            return 0
+        # اول از جیب، بعد از بانک
+        with closing(db_connect()) as db:
+            coins = u["coins"] or 0
+            from_pocket = min(coins, tax)
+            from_bank = tax - from_pocket
+            db.execute("UPDATE users SET coins = coins - ?, bank_balance = MAX(0, COALESCE(bank_balance,0) - ?) WHERE user_id = ?",
+                      (from_pocket, from_bank, user_id))
+            db.commit()
+        set_setting(f"tax_{user_id}", str(now))
+        update_level(user_id)
+        return tax
+    except Exception as e:
+        logger.warning(f"⚠️ خطا در مالیات: {e}")
+        return 0
+
 # ============================================================
 # 🛡️ بیمه خرستان — جبران باخت قمار + سپر دزدی
 # ============================================================
 
-INSURANCE_COST = 2000       # قیمت بیمه‌نامه
+INSURANCE_COST = 5000       # قیمت بیمه‌نامه
 INSURANCE_DAYS = 7          # مدت اعتبار
 INSURANCE_REFUND = 0.30     # ۳۰٪ باخت همه بازی‌ها برمی‌گرده
-INSURANCE_REFUND_CAP = 2000 # سقف جبران هر باخت
+INSURANCE_REFUND_CAP = 5000 # سقف جبران هر باخت
 
 def has_insurance(user_id):
     u = get_user(user_id)
@@ -1630,7 +1722,7 @@ async def baby_rename_command(update, context, idx, new_name):
 # جفت‌گیری
 # ============================================================
 
-MATE_COST = 500
+MATE_COST = 1500
 MAX_BABIES = 5
 MATE_COOLDOWN = 86400
 
@@ -2167,59 +2259,59 @@ SHOP_ITEMS = {
     "hats": {
         "name": "🎩 کلاه‌ها",
         "items": {
-            "کلاه نی": {"price": 500, "emoji": "🧑‍🌾"},
-            "کلاه کابوی": {"price": 2000, "emoji": "🤠"},
-            "کلاه نظامی": {"price": 4000, "emoji": "🪖"},
-            "کلاه شیک": {"price": 7000, "emoji": "🎩"},
-            "تاج سلطنتی": {"price": 15000, "emoji": "👑"}
+            "کلاه نی": {"price": 1500, "emoji": "🧑‍🌾"},
+            "کلاه کابوی": {"price": 6000, "emoji": "🤠"},
+            "کلاه نظامی": {"price": 12000, "emoji": "🪖"},
+            "کلاه شیک": {"price": 21000, "emoji": "🎩"},
+            "تاج سلطنتی": {"price": 45000, "emoji": "👑"}
         }
     },
     "saddles": {
         "name": "🐴 زین‌ها",
         "items": {
-            "زین چرمی ساده": {"price": 1000, "emoji": "🟫"},
-            "زین نقره‌ای": {"price": 3500, "emoji": "🥈"},
-            "زین طلایی": {"price": 8000, "emoji": "🥇"},
-            "زین الماسی": {"price": 20000, "emoji": "💎"}
+            "زین چرمی ساده": {"price": 3000, "emoji": "🟫"},
+            "زین نقره‌ای": {"price": 10500, "emoji": "🥈"},
+            "زین طلایی": {"price": 24000, "emoji": "🥇"},
+            "زین الماسی": {"price": 60000, "emoji": "💎"}
         }
     },
     "horseshoes": {
         "name": "👟 نعل‌ها",
         "items": {
-            "نعل آهنی": {"price": 500, "emoji": "⚙️"},
-            "نعل برنزی": {"price": 2000, "emoji": "🟠"},
-            "نعل نقره‌ای": {"price": 5000, "emoji": "⚪"},
-            "نعل طلایی": {"price": 12000, "emoji": "✨"}
+            "نعل آهنی": {"price": 1500, "emoji": "⚙️"},
+            "نعل برنزی": {"price": 6000, "emoji": "🟠"},
+            "نعل نقره‌ای": {"price": 15000, "emoji": "⚪"},
+            "نعل طلایی": {"price": 36000, "emoji": "✨"}
         }
     },
     "ties": {
         "name": "👔 کروات‌ها",
         "items": {
-            "کروات ساده": {"price": 500, "emoji": "⬛"},
-            "کروات راه‌راه": {"price": 1500, "emoji": "🟦"},
-            "کروات پولک‌دار": {"price": 3000, "emoji": "✨"},
-            "کروات ابریشمی": {"price": 6000, "emoji": "🎀"},
-            "کروات سلطنتی": {"price": 10000, "emoji": "👔"}
+            "کروات ساده": {"price": 1500, "emoji": "⬛"},
+            "کروات راه‌راه": {"price": 4500, "emoji": "🟦"},
+            "کروات پولک‌دار": {"price": 9000, "emoji": "✨"},
+            "کروات ابریشمی": {"price": 18000, "emoji": "🎀"},
+            "کروات سلطنتی": {"price": 30000, "emoji": "👔"}
         }
     },
     "clothes": {
         "name": "👕 لباس‌ها",
         "items": {
-            "لباس ساده": {"price": 500, "emoji": "👕"},
-            "لباس شیک": {"price": 2000, "emoji": "🧥"},
-            "لباس مجلسی": {"price": 4000, "emoji": "🤵"},
-            "لباس نظامی": {"price": 7000, "emoji": "🎖️"},
-            "لباس سلطنتی": {"price": 15000, "emoji": "👘"}
+            "لباس ساده": {"price": 1500, "emoji": "👕"},
+            "لباس شیک": {"price": 6000, "emoji": "🧥"},
+            "لباس مجلسی": {"price": 12000, "emoji": "🤵"},
+            "لباس نظامی": {"price": 21000, "emoji": "🎖️"},
+            "لباس سلطنتی": {"price": 45000, "emoji": "👘"}
         }
     },
     "accessories": {
         "name": "🎀 اکسسوری‌ها",
         "items": {
-            "زنگوله گردن": {"price": 500, "emoji": "🔔"},
-            "پاپیون ساده": {"price": 1000, "emoji": "🎀"},
-            "عینک آفتابی": {"price": 2500, "emoji": "😎"},
-            "شال گردن": {"price": 4000, "emoji": "🧣"},
-            "بال فرشته": {"price": 10000, "emoji": "🕊️"}
+            "زنگوله گردن": {"price": 1500, "emoji": "🔔"},
+            "پاپیون ساده": {"price": 3000, "emoji": "🎀"},
+            "عینک آفتابی": {"price": 7500, "emoji": "😎"},
+            "شال گردن": {"price": 12000, "emoji": "🧣"},
+            "بال فرشته": {"price": 30000, "emoji": "🕊️"}
         }
     }
 }
@@ -3708,14 +3800,14 @@ async def start_room_from_text(update, context, game_type, bet):
 # ============================================================
 
 OWNER_GIFTS = {
-    "گل": {"emoji": "🌹", "coins": 100},
-    "شکلات": {"emoji": "🍫", "coins": 250},
-    "کیک": {"emoji": "🎂", "coins": 500},
-    "خرس": {"emoji": "🧸", "coins": 1000},
-    "گردنبند": {"emoji": "📿", "coins": 2500},
-    "الماس": {"emoji": "💎", "coins": 5000},
-    "ماشین": {"emoji": "🚗", "coins": 10000},
-    "خونه": {"emoji": "🏠", "coins": 25000}
+    "گل": {"emoji": "🌹", "coins": 300},
+    "شکلات": {"emoji": "🍫", "coins": 750},
+    "کیک": {"emoji": "🎂", "coins": 1500},
+    "خرس": {"emoji": "🧸", "coins": 3000},
+    "گردنبند": {"emoji": "📿", "coins": 7500},
+    "الماس": {"emoji": "💎", "coins": 15000},
+    "ماشین": {"emoji": "🚗", "coins": 30000},
+    "خونه": {"emoji": "🏠", "coins": 75000}
 }
 
 # ============================================================
@@ -3765,13 +3857,13 @@ PANEL_GUIDES = {
         "2️⃣ بنویس: `کادو گل`\n"
         "✅ پیام تبریک + سکه به حسابش\n\n"
         "**🎁 لیست کادوها و ارزش‌شون:**\n"
-        "🌹 `کادو گل` — 100\n"
-        "🍫 `کادو شکلات` — 250\n"
-        "🎂 `کادو کیک` — 500\n"
-        "🧸 `کادو خرس` — 1,000\n"
-        "📿 `کادو گردنبند` — 2,500\n"
-        "💎 `کادو الماس` — 5,000\n"
-        "🚗 `کادو ماشین` — 10,000\n"
+        "🌹 `کادو گل` — 300\n"
+        "🍫 `کادو شکلات` — 750\n"
+        "🎂 `کادو کیک` — 1,500\n"
+        "🧸 `کادو خرس` — 3,000\n"
+        "📿 `کادو گردنبند` — 7,500\n"
+        "💎 `کادو الماس` — 15,000\n"
+        "🚗 `کادو ماشین` — 30,000\n"
         "🏠 `کادو خونه` — 25,000\n\n"
         "💡 اگه اسم کادو رو اشتباه بنویسی، ربات خودش لیست رو نشونت می‌ده."
     ),
@@ -3974,7 +4066,7 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 import httpx
 
-KHAR_DANA_COST = 100          # 💰 هزینه هر سوال (تی‌تاپ)
+KHAR_DANA_COST = 250          # 💰 هزینه هر سوال (تی‌تاپ)
 KHAR_DANA_COOLDOWN = 60       # ⏳ فاصله بین سوالات هر کاربر (ثانیه)
 KHAR_DANA_USER_DAILY = 10     # سقف روزانه هر کاربر
 KHAR_DANA_GLOBAL_DAILY = 900  # سقف کل ربات در روز (سهمیه رایگان جمینای نسوزه)
@@ -4172,7 +4264,7 @@ HELP_MAIN_TEXT = (
     "🎁 `روزانه` | 💼 `کار` | 🎡 `گردونه` | 🔮 `فال`\n"
     "🐴 `خرم` | 🔊 `صداها` | 📖 `راهنما`\n"
     "🎲 بازی: `انفجار 100` | `اسلات 100` | ...\n"
-    "🧠 `خر جان سوالت...` — از خر دانا بپرس! (۱۰۰ تی‌تاپ)\n\n"
+    "🧠 `خر جان سوالت...` — از خر دانا بپرس! (۲۵۰ تی‌تاپ)\n\n"
     "👇 برای توضیح کامل هر بخش، دکمه‌ش رو بزن:"
 )
 
@@ -4210,16 +4302,17 @@ HELP_SECTIONS = {
         "💼 `کار` — دستمزد تا ۹۰۰! (هر ۳۰ دقیقه)\n"
         "🎡 `گردونه` — تا ۱۰٬۰۰۰ جایزه! (هر ۳ ساعت)\n"
         "🔮 `فال` — فال + برکت تا ۲۰۰ (هر ۶ ساعت)\n"
-        "🔊 عرعر کن! — هر صدا ۱۵۰ تا ۱۲۰۰ شانسی (هر ۲ دقیقه)\n"
+        "🔊 عرعر کن! — هر صدا ۱۵۰ تا ۱۲۰۰ شانسی (هر ۵ دقیقه)\n"
         "🦹 `دزدی` (با ریپلی) — ۴۰٪ شانس، ولی جریمه داره! (هر ۲ ساعت)\n"
-        "💸 `انتقال 100` (با ریپلی) — سکه بده به رفیقت\n\n"
+        "🆘 `گدایی` — ورشکستی؟ مردم کمکت می‌کنن! (هر ۴ ساعت)\n"
+        "💸 `انتقال 100` (با ریپلی یا آیدی) — سکه بده به رفیقت (۱۰٪ مالیات، سقف ۱۰۰هزار)\n\n"
         "🏦 **بانک خرستان:**\n"
         "`بانک` — حسابت | `واریز 1000` | `برداشت همه`\n"
         "💹 `سود` — روزی **۳۰٪ سود**! ⚠️ هر روز باید خودت برداری وگرنه می‌سوزه!\n"
-        "💳 `وام 5000` (ریپلی روی ضامن سطح ۲+) — وام تا ۱۰هزار برای فقرا | `تسویه وام`\n"
+        "💳 `وام 5000` (ریپلی روی ضامن سطح ۲+) — وام تا ۳۰هزار برای فقرا | `تسویه وام`\n"
         "🛡️ پولت توی بانک از دزدی در امانه!\n\n"
         "🛡️ **بیمه خرستان:**\n"
-        "`بیمه` — وضعیت | `خرید بیمه` — ۲۰۰۰ برای ۷ روز\n"
+        "`بیمه` — وضعیت | `خرید بیمه` — ۵۰۰۰ برای ۷ روز\n"
         "📉 ۳۰٪ باخت **همه بازی‌ها** خودکار برمی‌گرده + دزدها حریفت نمی‌شن!"
     ),
     "help_sounds": SOUNDS_LIST_TEXT,
@@ -4229,7 +4322,7 @@ HELP_SECTIONS = {
         "🐴 `خرم` — نمایش خرت با تجهیزاتش\n"
         "🏪 `فروشگاه` — خرید کلاه، زین، نعل، کروات، لباس، اکسسوری\n"
         "👤 `پروفایل` — مشخصات کامل (با ریپلی: پروفایل بقیه)\n"
-        "❤️ `جفت‌گیری` یا `جفتگیری` (با ریپلی) — کره‌خر دار شو! (سطح ۲ لازمه، ۵۰۰ سکه)\n"
+        "❤️ `جفت‌گیری` یا `جفتگیری` (با ریپلی) — کره‌خر دار شو! (سطح ۲ لازمه، ۱۵۰۰ سکه)\n"
         "💌 طرف مقابل باید با دکمه «قبوله!» موافقت کنه وگرنه انجام نمی‌شه\n"
         "🐣 `کره‌خرها` — پنل کره‌خرها با دکمه: ارتقا، سود، تغییر اسم\n"
         "⬆️ `ارتقا کره‌خر 1` — ارتقا بده تا سود بیشتری بده (تا ۵۰۰۰ در روز!)\n"
@@ -4247,7 +4340,7 @@ HELP_SECTIONS = {
         "💰 `سکه` — نمایش موجودیت\n"
         "🏆 `جدول` — ۱۰ نفر ثروتمند طویله + رتبه خودت\n"
         "🔊 `صداها` — لیست همه صداهای خر و پوینت‌هاشون\n"
-        "🧠 `خر جان هرچی می‌خوای بپرس` — خر دانا با هوش مصنوعی جوابتو می‌ده! (۱۰۰ تی‌تاپ، ۱۰ سوال در روز)\n"
+        "🧠 `خر جان هرچی می‌خوای بپرس` — خر دانا با هوش مصنوعی جوابتو می‌ده! (۲۵۰ تی‌تاپ، ۱۰ سوال در روز)\n"
         "📖 `راهنما` — همین راهنما\n"
         "/start — پیام خوش‌آمد\n\n"
         "🔒 **نکته:** هر منویی که خودت باز کنی، فقط خودت می‌تونی دکمه‌هاش رو بزنی. "
@@ -4281,7 +4374,7 @@ OWNER_HELP_TEXT = (
     "`-سکه 1000` — کسر سکه 🔥\n"
     "`کادو گل` — کادو دادن 🎁\n"
     "`بن` / `انبن` — بن و آنبن 🚫\n\n"
-    "🎁 **کادوها:** گل 🌹(100) | شکلات 🍫(250) | کیک 🎂(500) | خرس 🧸(1000) | گردنبند 📿(2500) | الماس 💎(5000) | ماشین 🚗(10000) | خونه 🏠(25000)"
+    "🎁 **کادوها:** گل 🌹(300) | شکلات 🍫(750) | کیک 🎂(1500) | خرس 🧸(3000) | گردنبند 📿(7500) | الماس 💎(15000) | ماشین 🚗(30000) | خونه 🏠(75000)"
 )
 
 # ============================================================
@@ -4371,6 +4464,7 @@ FJ_KNOWN_CMDS = {
     "babies", "پنل کره‌خر", "پنل کره خر",
     "لغو بازی", "لغوبازی", "خروج از بازی", "cancelgame",
     "بانک", "bank", "حساب بانکی", "بیمه", "insurance", "خرید بیمه", "خریدبیمه", "بیمه بخر",
+    "گدایی", "کمک مالی", "beg",
     "سود", "سود بانک", "برداشت سود", "تسویه وام", "تسویه‌وام", "تسویه"
 }
 FJ_FIRST_WORD_CMDS = {"اسلات", "slot", "دوبل", "double", "انتقال", "transfer", "هدیه", "ارتقا", "اسم", "خرجان", "خردانا", "واریز", "برداشت", "deposit", "withdraw", "وام", "loan"}
@@ -4459,6 +4553,19 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔒 جوین اجباری — بدون عضویت هیچ دستوری کار نمی‌کنه
     if not await force_join_gate(update, context, user.id):
         return
+    
+    # 💸 مالیات ثروت (روزی یه بار برای خیلی‌پولدارها)
+    try:
+        tax = collect_wealth_tax(user.id)
+        if tax > 0:
+            await update.message.reply_text(
+                f"💸 **مالیات طویله!**\n"
+                f"👑 {esc_md(user.first_name)} عزیز، نگهداری این همه ثروت خرج داره!\n"
+                f"🧾 {tax:,} {CURRENCY_NAME} هزینه نگهداری طویله کم شد.\n"
+                f"💡 (فقط ثروت بالای {WEALTH_TAX_THRESHOLD:,} مالیات می‌خوره)",
+                parse_mode="Markdown")
+    except Exception as e:
+        logger.warning(f"⚠️ خطا در مالیات: {e}")
     
     # 💳 وصول خودکار قسط وام (روزی یک قسط — نداشت از ضامن! 😂)
     try:
@@ -4681,6 +4788,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== فال =====
     if text in ["فال", "fortune", "طالع"]:
         await fortune_command(update, context)
+        return
+    
+    # ===== 🆘 گدایی (تور نجات ورشکسته‌ها) =====
+    if text in ["گدایی", "کمک مالی", "beg"]:
+        await beg_command(update, context)
         return
     
     # ===== دزدی =====
