@@ -112,7 +112,8 @@ def init_db():
             db.commit()
             # مهاجرت: ستون‌های جدید (اگر دیتابیس قدیمی باشد)
             existing = {r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()}
-            for col in ["last_work", "last_wheel", "last_rob", "last_fortune", "sound_count"]:
+            for col in ["last_work", "last_wheel", "last_rob", "last_fortune", "sound_count",
+                        "bank_balance", "bank_last", "insurance_until"]:
                 if col not in existing:
                     db.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
             db.commit()
@@ -206,12 +207,17 @@ def record_win(user_id):
         db.commit()
     update_level(user_id)
 
-def record_loss(user_id):
-    if user_id == BOT_ID: return
+def record_loss(user_id, lost=0):
+    """ثبت باخت + جبران خودکار بیمه (۳۰٪ باخت در همه بازی‌ها)"""
+    if user_id == BOT_ID: return 0
     with closing(db_connect()) as db:
         db.execute("UPDATE users SET losses = losses + 1 WHERE user_id = ?", (user_id,))
         db.commit()
     update_level(user_id)
+    try:
+        return insurance_refund(user_id, lost)
+    except NameError:
+        return 0
 
 def update_level(user_id):
     with closing(db_connect()) as db:
@@ -306,8 +312,8 @@ def profile_text(user_id):
 # ============================================================
 
 DAILY_COOLDOWN = 86400
-DAILY_MIN = 100
-DAILY_MAX = 500
+DAILY_MIN = 500
+DAILY_MAX = 1500
 
 async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
@@ -334,14 +340,13 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reward += extra
         bonus = f"\n🎉 **جایزه ویژه!** +{extra} {CURRENCY_NAME}"
     
-    # 🐣 سود کره‌خرها — خودکار همراه جایزه روزانه
+    # 🐣 سود کره‌خرها الان از پنل کره‌خرها برداشت می‌شه (دستور: کره‌خرها)
     babies = load_babies(u)
-    baby_income = babies_daily_income(babies)
     baby_line_txt = ""
-    if baby_income > 0:
-        baby_line_txt = f"\n🐣 سود کره‌خرها ({len(babies)} عدد): **+{baby_income}** {CURRENCY_NAME}"
+    if babies:
+        baby_line_txt = f"\n🐣 یادت نره سود کره‌خرهات رو از پنل «کره‌خرها» برداری!"
     
-    total = reward + baby_income
+    total = reward
     add_coins(user.id, total)
     with closing(db_connect()) as db:
         db.execute("UPDATE users SET last_daily = ? WHERE user_id = ?", (now, user.id))
@@ -354,7 +359,6 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 جایزه: **{reward}** {CURRENCY_NAME}"
         f"{bonus}"
         f"{baby_line_txt}\n"
-        f"💎 جمع کل: **{total}** {CURRENCY_NAME}\n"
         f"\n📅 فردا دوباره بیا! 🐴",
         parse_mode="Markdown"
     )
@@ -364,8 +368,8 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 # 💰 همه صداها امتیاز یکسان دارن: شانسی از ۵۰ تا ۵۰۰!
-SOUND_MIN = 50
-SOUND_MAX = 500
+SOUND_MIN = 150
+SOUND_MAX = 1200
 SOUND_RARE_CHANCE = 0.07  # شانس عر طلایی
 
 SOUND_KEYWORDS = {
@@ -488,17 +492,17 @@ SOUNDS_LIST_TEXT = (
 # کار کردن
 # ============================================================
 
-WORK_COOLDOWN = 3600  # هر ۱ ساعت
+WORK_COOLDOWN = 1800  # هر ۳۰ دقیقه
 
 WORK_JOBS = [
-    {"name": "🌾 گاری‌کشی توی مزرعه", "min": 50, "max": 150},
-    {"name": "🧱 آجرکشی سر ساختمون", "min": 60, "max": 170},
-    {"name": "🚕 مسافرکشی با گاری", "min": 40, "max": 200},
-    {"name": "🎪 بازیگری توی سیرک", "min": 30, "max": 250},
-    {"name": "📦 باربری بازار", "min": 70, "max": 160},
-    {"name": "🎨 مدل نقاشی نقاش‌های خیابونی", "min": 20, "max": 220},
-    {"name": "🏇 مسابقه دو با اسب‌ها", "min": 10, "max": 300},
-    {"name": "🧹 نظافت طویله همسایه", "min": 80, "max": 140}
+    {"name": "🌾 گاری‌کشی توی مزرعه", "min": 150, "max": 450},
+    {"name": "🧱 آجرکشی سر ساختمون", "min": 180, "max": 500},
+    {"name": "🚕 مسافرکشی با گاری", "min": 120, "max": 600},
+    {"name": "🎪 بازیگری توی سیرک", "min": 100, "max": 750},
+    {"name": "📦 باربری بازار", "min": 200, "max": 480},
+    {"name": "🎨 مدل نقاشی نقاش‌های خیابونی", "min": 80, "max": 650},
+    {"name": "🏇 مسابقه دو با اسب‌ها", "min": 50, "max": 900},
+    {"name": "🧹 نظافت طویله همسایه", "min": 250, "max": 420}
 ]
 
 WORK_FAILS = [
@@ -546,7 +550,7 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💼 **کار: {job['name']}**\n━━━━━━━━━━━━━━\n"
         f"👤 {esc_md(user.first_name)} یه ساعت جون کند...\n"
         f"💰 دستمزد: **+{wage}** {CURRENCY_NAME}\n\n"
-        f"⏰ یک ساعت دیگه دوباره می‌تونی کار کنی!",
+        f"⏰ نیم ساعت دیگه دوباره می‌تونی کار کنی!",
         parse_mode="Markdown"
     )
 
@@ -556,13 +560,13 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 WHEEL_COOLDOWN = 10800  # هر ۳ ساعت
 WHEEL_PRIZES = [
-    (25, "💨 هیچی! گردونه خالی چرخید", 0),
-    (25, "🪙 یه مشت سکه", 50),
-    (20, "💰 کیسه سکه", 150),
-    (15, "💎 جواهر کوچیک", 300),
-    (10, "🏆 گنج طویله", 600),
-    (4,  "👑 جکپات سلطنتی", 1500),
-    (1,  "🌟 گنج افسانه‌ای خرستان", 5000)
+    (15, "💨 هیچی! گردونه خالی چرخید", 0),
+    (25, "🪙 یه مشت سکه", 150),
+    (22, "💰 کیسه سکه", 400),
+    (18, "💎 جواهر کوچیک", 800),
+    (13, "🏆 گنج طویله", 1500),
+    (5,  "👑 جکپات سلطنتی", 4000),
+    (2,  "🌟 گنج افسانه‌ای خرستان", 10000)
 ]
 
 async def wheel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -657,6 +661,15 @@ async def rob_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"😅 {esc_md(target.first_name)} انقدر فقیره که چیزی برای دزدیدن نداره!")
         return
     
+    # 🛡️ هدف بیمه داره؟ دزدی ناکام!
+    if has_insurance(target.id):
+        await update.message.reply_text(
+            f"🛡️ **دزدی ناکام!**\n"
+            f"{esc_md(target.first_name)} بیمه خرستان داره — نگهبانای بیمه گرفتنت! 🚨\n"
+            f"این دفعه جریمه نشدی، ولی سراغ بیمه‌شده‌ها نرو! 😏",
+            parse_mode="Markdown")
+        return
+    
     with closing(db_connect()) as db:
         db.execute("UPDATE users SET last_rob = ? WHERE user_id = ?", (now, user.id))
         db.commit()
@@ -697,16 +710,16 @@ async def rob_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 FORTUNE_COOLDOWN = 21600  # هر ۶ ساعت
 
 FORTUNES = [
-    ("🌟 امروز روز شانسته! یه عر بلند بکش!", 50),
-    ("💰 ثروت بزرگی در راهه... شاید هم یونجه باشه!", 30),
-    ("❤️ یک خر جذاب به زندگیت وارد می‌شه!", 20),
-    ("🎲 امروز توی قمار دستت داغه! (شایدم نه 😏)", 25),
-    ("🐴 خر درونت رو آزاد کن، موفقیت نزدیکه!", 35),
-    ("🌈 بعد از هر عرعری، رنگین‌کمونی هست!", 15),
-    ("⚠️ مواظب باش! یکی می‌خواد ازت بدزده!", 10),
-    ("🦄 تو فقط یه خر نیستی، یه تک‌شاخ در حال پیشرفتی!", 40),
-    ("📿 ستاره‌ها می‌گن: کمتر جفتک بنداز، بیشتر پس‌انداز کن!", 20),
-    ("🔮 عدد شانس امروزت: عر!", 30)
+    ("🌟 امروز روز شانسته! یه عر بلند بکش!", 200),
+    ("💰 ثروت بزرگی در راهه... شاید هم یونجه باشه!", 120),
+    ("❤️ یک خر جذاب به زندگیت وارد می‌شه!", 80),
+    ("🎲 امروز توی قمار دستت داغه! (شایدم نه 😏)", 100),
+    ("🐴 خر درونت رو آزاد کن، موفقیت نزدیکه!", 140),
+    ("🌈 بعد از هر عرعری، رنگین‌کمونی هست!", 60),
+    ("⚠️ مواظب باش! یکی می‌خواد ازت بدزده!", 160),
+    ("🦄 تو فقط یه خر نیستی، یه تک‌شاخ در حال پیشرفتی!", 160),
+    ("📿 ستاره‌ها می‌گن: کمتر جفتک بنداز، بیشتر پس‌انداز کن!", 80),
+    ("🔮 عدد شانس امروزت: عر!", 120)
 ]
 
 async def fortune_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -781,6 +794,520 @@ async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE, a
     )
 
 # ============================================================
+# 🏦 بانک خرستان — سپرده با سود روزانه + امنیت در برابر دزدی
+# ============================================================
+
+BANK_INTEREST = 0.30        # ۳۰٪ سود روزانه
+BANK_MIN_DEPOSIT = 100
+BANK_MAX_BALANCE = 500000   # سقف حساب (که اقتصاد منفجر نشه)
+
+def bank_pending_interest(user_id):
+    """💹 سود آماده برداشت — فقط «یک روز» سود، مرکب نمی‌شه!
+    خروجی: (سود قابل برداشت, آیا ۲۴ ساعت گذشته)"""
+    u = get_user(user_id)
+    if not u: return 0, False
+    balance = u["bank_balance"] or 0
+    last = u["bank_last"] or 0
+    now = int(time.time())
+    if balance <= 0:
+        return 0, False
+    if not last:
+        with closing(db_connect()) as db:
+            db.execute("UPDATE users SET bank_last = ? WHERE user_id = ?", (now, user_id))
+            db.commit()
+        return 0, False
+    if now - last < 86400:
+        return 0, False
+    # ⚠️ فقط سود یک روز — دیر بیای، سود روزهای قبل سوخته!
+    return int(balance * BANK_INTEREST), True
+
+def bank_apply_interest(user_id):
+    """(سازگاری با کد قدیمی) — دیگه خودکار واریز نمی‌کنه، فقط صفر برمی‌گردونه"""
+    return 0
+
+async def bank_claim_interest(update, context):
+    """💹 برداشت سود روزانه — دستور: «سود»"""
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    u = get_user(user.id)
+    balance = u["bank_balance"] or 0
+    if balance <= 0:
+        await update.message.reply_text("🏦 حساب بانکیت خالیه! اول `واریز 1000` کن.", parse_mode="Markdown")
+        return
+    interest, ready = bank_pending_interest(user.id)
+    now = int(time.time())
+    last = u["bank_last"] or now
+    if not ready:
+        remaining = 86400 - (now - last)
+        h, mnt = remaining // 3600, (remaining % 3600) // 60
+        await update.message.reply_text(
+            f"⏳ سودت هنوز نرسیده! {h} ساعت و {mnt} دقیقه دیگه بیا.\n"
+            f"💹 سود فردا: ~{int(balance * BANK_INTEREST):,} {CURRENCY_NAME}")
+        return
+    add_coins(user.id, interest)
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET bank_last = ? WHERE user_id = ?", (now, user.id))
+        db.commit()
+    await update.message.reply_text(
+        f"💹 **سود بانکی برداشت شد!**\n━━━━━━━━━━━━━━\n"
+        f"💰 +{interest:,} {CURRENCY_NAME} به جیبت!\n"
+        f"🏦 سپرده: {balance:,} (دست‌نخورده)\n\n"
+        f"⚠️ یادت نره: سود روزانه‌ست — هر روز «سود» بزن وگرنه می‌سوزه!",
+        parse_mode="Markdown")
+
+def bank_text(user_id):
+    u = get_user(user_id)
+    balance = u["bank_balance"] or 0
+    interest, ready = bank_pending_interest(user_id)
+    loan = get_loan(user_id)
+    msg = (
+        f"🏦 **بانک خرستان**\n━━━━━━━━━━━━━━\n"
+        f"👤 {esc_md(u['name'])}\n"
+        f"💰 موجودی حساب: **{balance:,}** {CURRENCY_NAME}\n"
+        f"💵 پول نقد (جیبت): {u['coins']:,} {CURRENCY_NAME}\n"
+    )
+    if ready and interest > 0:
+        msg += f"\n💹 **سود آماده برداشته:** +{interest:,} — بزن `سود`! 🎉\n"
+    if loan > 0:
+        msg += f"\n💳 **بدهی وام:** {loan:,} {CURRENCY_NAME} — تسویه: `تسویه وام`\n"
+    msg += (
+        f"\n📈 سود روزانه: **{int(BANK_INTEREST*100)}٪**\n"
+        f"⚠️ سود باید **هر روز** با دستور `سود` برداشت شه — برنداری می‌سوزه!\n"
+        f"🛡️ پول توی بانک از **دزدی در امانه!**\n"
+        f"📊 سقف حساب: {BANK_MAX_BALANCE:,}\n\n"
+        f"📋 **دستورات:**\n"
+        f"`واریز 1000` — پول بذار توی بانک\n"
+        f"`برداشت 1000` — پول بردار (یا `برداشت همه`)\n"
+        f"`سود` — برداشت سود روزانه 💹\n"
+        f"`وام 5000` (با ریپلی روی ضامن) — وام تا {LOAN_MAX:,} 💳\n"
+        f"`تسویه وام` — پرداخت بدهی\n"
+    )
+    return msg
+
+async def bank_deposit(update, context, amount):
+    user = update.effective_user
+    bank_apply_interest(user.id)
+    u = get_user(user.id)
+    balance = u["bank_balance"] or 0
+    if amount < BANK_MIN_DEPOSIT:
+        await update.message.reply_text(f"❌ حداقل واریز {BANK_MIN_DEPOSIT} {CURRENCY_NAME}ه!")
+        return
+    if balance + amount > BANK_MAX_BALANCE:
+        amount = BANK_MAX_BALANCE - balance
+        if amount <= 0:
+            await update.message.reply_text(f"🏦 حسابت پره! (سقف: {BANK_MAX_BALANCE:,})")
+            return
+    if not remove_coins(user.id, amount):
+        await update.message.reply_text(f"❌ انقدر پول نقد نداری! جیبت: {u['coins']:,} {CURRENCY_NAME}")
+        return
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET bank_balance = COALESCE(bank_balance,0) + ? WHERE user_id = ?", (amount, user.id))
+        db.commit()
+    u = get_user(user.id)
+    await update.message.reply_text(
+        f"🏦 **واریز موفق!**\n💰 +{amount:,} {CURRENCY_NAME}\n"
+        f"📊 موجودی حساب: {u['bank_balance']:,} | جیب: {u['coins']:,}\n"
+        f"💹 از فردا روزی {int(BANK_INTEREST*100)}٪ سود می‌گیری!",
+        parse_mode="Markdown")
+
+async def bank_withdraw(update, context, amount_str):
+    user = update.effective_user
+    bank_apply_interest(user.id)
+    u = get_user(user.id)
+    balance = u["bank_balance"] or 0
+    if balance <= 0:
+        await update.message.reply_text("🏦 حسابت خالیه! اول `واریز 1000` کن.", parse_mode="Markdown")
+        return
+    if amount_str in ["همه", "کل", "all"]:
+        amount = balance
+    else:
+        amount = int(amount_str)
+        if amount <= 0 or amount > balance:
+            await update.message.reply_text(f"❌ موجودی حسابت: {balance:,} {CURRENCY_NAME}")
+            return
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET bank_balance = bank_balance - ? WHERE user_id = ?", (amount, user.id))
+        db.commit()
+    add_coins(user.id, amount)
+    u = get_user(user.id)
+    await update.message.reply_text(
+        f"🏦 **برداشت موفق!**\n💵 +{amount:,} {CURRENCY_NAME} به جیبت\n"
+        f"📊 حساب: {u['bank_balance']:,} | جیب: {u['coins']:,}",
+        parse_mode="Markdown")
+
+# ============================================================
+# 💳 وام بانکی — تا ۱۰هزار، فقط برای فقرا، با ضامن سطح ۲+
+# ============================================================
+
+LOAN_MAX = 10000
+LOAN_NEED_BELOW = 5000      # فقط وقتی پول نقد زیر این باشه وام می‌دن
+LOAN_GUARANTOR_LEVEL = 2    # حداقل سطح ضامن
+LOAN_MIN = 500
+LOAN_DAYS = 10              # 📅 بازپرداخت در ۱۰ قسط روزانه خودکار
+
+# درخواست‌های وام منتظر تایید ضامن: {(chat_id, msg_id): {...}}
+LOAN_REQUESTS = {}
+LOAN_REQUEST_TTL = 300
+
+def get_loan(user_id):
+    return int(get_setting(f"loan_{user_id}", "0") or 0)
+
+def set_loan(user_id, amount):
+    set_setting(f"loan_{user_id}", str(max(0, amount)))
+
+def get_loan_info(user_id):
+    """اطلاعات وام: (بدهی, ضامن, قسط روزانه, آخرین قسط)"""
+    debt = get_loan(user_id)
+    guarantor = int(get_setting(f"loan_g_{user_id}", "0") or 0)
+    installment = int(get_setting(f"loan_i_{user_id}", "0") or 0)
+    last_pay = int(get_setting(f"loan_t_{user_id}", "0") or 0)
+    return debt, guarantor, installment, last_pay
+
+def set_loan_info(user_id, debt, guarantor, installment, last_pay):
+    set_loan(user_id, debt)
+    set_setting(f"loan_g_{user_id}", str(guarantor))
+    set_setting(f"loan_i_{user_id}", str(installment))
+    set_setting(f"loan_t_{user_id}", str(last_pay))
+
+def clear_loan(user_id):
+    set_loan(user_id, 0)
+    set_setting(f"loan_g_{user_id}", "0")
+    set_setting(f"loan_i_{user_id}", "0")
+    set_setting(f"loan_t_{user_id}", "0")
+
+def loan_collect_due(user_id):
+    """💸 وصول قسط‌های عقب‌افتاده — روزی یک قسط. نداشت؟ از ضامن! 😂
+    خروجی: لیست رویدادها برای گزارش"""
+    debt, guarantor, installment, last_pay = get_loan_info(user_id)
+    if debt <= 0 or installment <= 0:
+        return []
+    now = int(time.time())
+    if not last_pay:
+        set_setting(f"loan_t_{user_id}", str(now))
+        return []
+    days_due = int((now - last_pay) // 86400)
+    if days_due <= 0:
+        return []
+    events = []
+    for _ in range(min(days_due, 15)):
+        if debt <= 0:
+            break
+        due = min(installment, debt)
+        u = get_user(user_id)
+        if u and (u["coins"] or 0) >= due:
+            remove_coins(user_id, due)
+            debt -= due
+            events.append(("self", due))
+        else:
+            # 😂 از جیب خود بدهکار هرچی داره، بقیه از ضامن!
+            from_self = min(u["coins"] or 0, due) if u else 0
+            if from_self > 0:
+                remove_coins(user_id, from_self)
+            from_g = due - from_self
+            if from_g > 0 and guarantor:
+                with closing(db_connect()) as db:
+                    db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (from_g, guarantor))
+                    db.commit()
+            debt -= due
+            events.append(("guarantor", due, from_self, from_g))
+    if debt <= 0:
+        clear_loan(user_id)
+    else:
+        set_loan(user_id, debt)
+        set_setting(f"loan_t_{user_id}", str(last_pay + days_due * 86400))
+    return events
+
+
+async def loan_request(update, context, amount):
+    """درخواست وام — با ریپلی روی ضامن"""
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    u = get_user(user.id)
+    
+    if get_loan(user.id) > 0:
+        await update.message.reply_text(
+            f"❌ هنوز {get_loan(user.id):,} {CURRENCY_NAME} بدهی داری!\nاول `تسویه وام` کن بعد وام جدید بگیر.",
+            parse_mode="Markdown")
+        return
+    if u["coins"] >= LOAN_NEED_BELOW:
+        await update.message.reply_text(
+            f"❌ وام فقط به نیازمنداست! تو {u['coins']:,} {CURRENCY_NAME} داری.\n"
+            f"(شرط: پول نقد زیر {LOAN_NEED_BELOW:,})")
+        return
+    if amount < LOAN_MIN or amount > LOAN_MAX:
+        await update.message.reply_text(f"❌ مبلغ وام باید بین {LOAN_MIN} تا {LOAN_MAX:,} باشه!")
+        return
+    if not update.message.reply_to_message:
+        await update.message.reply_text(
+            f"💳 **درخواست وام**\n"
+            f"روی پیام **ضامنت** ریپلی بزن و بنویس: `وام {amount}`\n"
+            f"⚠️ ضامن باید حداقل **سطح {LOAN_GUARANTOR_LEVEL}** باشه و تایید کنه.\n"
+            f"اگه تسویه نکنی، بدهی از جیب ضامن کم می‌شه! 😈",
+            parse_mode="Markdown")
+        return
+    
+    guarantor = update.message.reply_to_message.from_user
+    if guarantor.id == user.id:
+        await update.message.reply_text("❌ خودت ضامن خودت؟! 😂 یکی دیگه رو پیدا کن.")
+        return
+    if guarantor.is_bot:
+        await update.message.reply_text("❌ ربات ضامن نمی‌شه! 🤖")
+        return
+    ensure_user(guarantor.id, guarantor.first_name)
+    g = get_user(guarantor.id)
+    if g["level"] < LOAN_GUARANTOR_LEVEL:
+        await update.message.reply_text(
+            f"❌ ضامنت باید حداقل **سطح {LOAN_GUARANTOR_LEVEL}** باشه!\n"
+            f"{esc_md(guarantor.first_name)} الان سطح {g['level']}ه. 🐣",
+            parse_mode="Markdown")
+        return
+    
+    sent = await update.message.reply_text(
+        f"💳 **درخواست وام!**\n━━━━━━━━━━━━━━\n"
+        f"👤 وام‌گیرنده: {esc_md(user.first_name)}\n"
+        f"💰 مبلغ: **{amount:,}** {CURRENCY_NAME}\n"
+        f"🤝 ضامن: {esc_md(guarantor.first_name)} (سطح {g['level']})\n\n"
+        f"⚠️ {esc_md(guarantor.first_name)} عزیز: اگه تسویه نکنه، بدهی از **جیب تو** کم می‌شه!\n"
+        f"❓ ضمانت می‌کنی؟ (۵ دقیقه فرصت)",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ ضمانت می‌کنم", callback_data="loan_yes"),
+            InlineKeyboardButton("❌ نه بابا!", callback_data="loan_no")
+        ]]),
+        parse_mode="Markdown")
+    
+    now = time.time()
+    for k in list(LOAN_REQUESTS.keys()):
+        if now - LOAN_REQUESTS[k]["time"] > LOAN_REQUEST_TTL:
+            LOAN_REQUESTS.pop(k, None)
+    LOAN_REQUESTS[(update.effective_chat.id, sent.message_id)] = {
+        "borrower": user.id, "guarantor": guarantor.id, "amount": amount, "time": now
+    }
+
+async def loan_callback(update, context, query, answer):
+    """جواب ضامن — فقط خود ضامن"""
+    key = (query.message.chat_id, query.message.message_id)
+    req = LOAN_REQUESTS.get(key)
+    if not req:
+        await query.answer("❌ این درخواست منقضی شده!", show_alert=True)
+        try:
+            await query.edit_message_text("⌛ درخواست وام منقضی شد.")
+        except Exception:
+            pass
+        return
+    uid = query.from_user.id
+    if uid != req["guarantor"]:
+        if uid == req["borrower"]:
+            await query.answer("😅 ضامن باید جواب بده، نه خودت!", show_alert=True)
+        else:
+            await query.answer("🔒 این درخواست مال تو نیست!", show_alert=True)
+        return
+    if time.time() - req["time"] > LOAN_REQUEST_TTL:
+        LOAN_REQUESTS.pop(key, None)
+        await query.answer("⌛ منقضی شد!", show_alert=True)
+        await query.edit_message_text("⌛ درخواست وام منقضی شد.")
+        return
+    
+    LOAN_REQUESTS.pop(key, None)
+    
+    if answer == "no":
+        await query.answer("❌ رد شد!")
+        await query.edit_message_text(
+            f"❌ **ضمانت رد شد!**\n{uname(req['guarantor'])} حاضر نشد ضامن {uname(req['borrower'])} بشه! 😅\n"
+            f"برو یه رفیق باوفاتر پیدا کن 🐴", parse_mode="Markdown")
+        return
+    
+    # ✅ تایید — شرایط دوباره چک بشه
+    b = get_user(req["borrower"])
+    if get_loan(req["borrower"]) > 0 or (b and b["coins"] >= LOAN_NEED_BELOW):
+        await query.answer("❌ شرایط وام‌گیرنده تغییر کرده!", show_alert=True)
+        await query.edit_message_text("❌ وام رد شد: شرایط وام‌گیرنده دیگه برقرار نیست.")
+        return
+    
+    installment = max(1, req["amount"] // LOAN_DAYS)
+    set_loan_info(req["borrower"], req["amount"], req["guarantor"], installment, int(time.time()))
+    add_coins(req["borrower"], req["amount"])
+    await query.answer("✅ وام واریز شد!")
+    await query.edit_message_text(
+        f"💳 **وام پرداخت شد!**\n━━━━━━━━━━━━━━\n"
+        f"💰 {req['amount']:,} {CURRENCY_NAME} به جیب {uname(req['borrower'])} واریز شد!\n"
+        f"🤝 ضامن: {uname(req['guarantor'])}\n\n"
+        f"📅 **بازپرداخت خودکار:** روزی {installment:,} {CURRENCY_NAME} در {LOAN_DAYS} روز\n"
+        f"😈 پول نداشته باشه، قسط از جیب **ضامن** کم می‌شه!\n"
+        f"📌 تسویه زودتر: `تسویه وام`",
+        parse_mode="Markdown")
+
+async def loan_repay(update, context):
+    user = update.effective_user
+    loan = get_loan(user.id)
+    if loan <= 0:
+        await update.message.reply_text("✅ تو بدهی نداری! دمت گرم 🐴")
+        return
+    u = get_user(user.id)
+    pay = min(loan, u["coins"])
+    if pay <= 0:
+        await update.message.reply_text(f"❌ پول نقد نداری! بدهیت: {loan:,} {CURRENCY_NAME}")
+        return
+    remove_coins(user.id, pay)
+    if loan - pay <= 0:
+        clear_loan(user.id)
+    else:
+        set_loan(user.id, loan - pay)
+    left = get_loan(user.id)
+    if left == 0:
+        await update.message.reply_text(
+            f"🎉 **وام تسویه شد!**\n💸 {pay:,} {CURRENCY_NAME} پرداختی.\nحالا دوباره می‌تونی وام بگیری. آفرین خر خوش‌حساب! 🐴✅",
+            parse_mode="Markdown")
+    else:
+        await update.message.reply_text(
+            f"💸 {pay:,} پرداخت شد.\n💳 باقی‌مانده بدهی: **{left:,}** {CURRENCY_NAME}",
+            parse_mode="Markdown")
+
+# ------------------------------------------------------------
+# 🏦 پنل بانک (دکمه شیشه‌ای)
+# ------------------------------------------------------------
+
+def bank_panel_keyboard(user_id):
+    u = get_user(user_id)
+    balance = (u["bank_balance"] or 0) if u else 0
+    interest, ready = bank_pending_interest(user_id)
+    rows = []
+    if ready and interest > 0:
+        rows.append([InlineKeyboardButton(f"💹 برداشت سود (+{interest:,})", callback_data="bankp_claim")])
+    rows.append([InlineKeyboardButton("💰 واریز", callback_data="bankp_dep"),
+                 InlineKeyboardButton("💵 برداشت همه", callback_data="bankp_wd_all")])
+    if get_loan(user_id) > 0:
+        rows.append([InlineKeyboardButton("💳 تسویه وام", callback_data="bankp_repay")])
+    rows.append([InlineKeyboardButton("🔄 بروزرسانی", callback_data="bankp_home"),
+                 InlineKeyboardButton("🏠 منو", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
+def bank_panel_text(user_id):
+    u = get_user(user_id)
+    balance = u["bank_balance"] or 0
+    interest, ready = bank_pending_interest(user_id)
+    debt, guarantor, installment, _ = get_loan_info(user_id)
+    now = int(time.time())
+    last = u["bank_last"] or now
+    msg = (
+        f"🏦 **بانک خرستان**\n━━━━━━━━━━━━━━\n"
+        f"👤 {esc_md(u['name'])}\n"
+        f"💰 سپرده: **{balance:,}** {CURRENCY_NAME}\n"
+        f"💵 جیب: {u['coins']:,} {CURRENCY_NAME}\n"
+    )
+    if balance > 0:
+        if ready and interest > 0:
+            msg += f"💹 سود آماده برداشت: **+{interest:,}** — دکمه رو بزن! 🎉\n"
+        else:
+            remaining = 86400 - (now - last)
+            msg += f"⏳ سود بعدی ({int(BANK_INTEREST*100)}٪ = {int(balance*BANK_INTEREST):,}) تا {remaining//3600} ساعت و {(remaining%3600)//60} دقیقه دیگه\n"
+    if debt > 0:
+        msg += (f"\n💳 **بدهی وام:** {debt:,} {CURRENCY_NAME}\n"
+                f"📅 قسط خودکار: روزی {installment:,} — نداشته باشی از ضامن ({uname(guarantor)}) کم می‌شه! 😈\n")
+    msg += (
+        f"\n📈 سود روزانه: **{int(BANK_INTEREST*100)}٪** — هر روز باید برداری وگرنه می‌سوزه!\n"
+        f"🛡️ پول توی بانک از دزدی در امانه\n"
+        f"💬 دستور متنی: `واریز 1000` | `برداشت 500` | `سود` | `وام 5000` (ریپلی روی ضامن)"
+    )
+    return msg
+
+# ------------------------------------------------------------
+# 🛡️ پنل بیمه (دکمه شیشه‌ای)
+# ------------------------------------------------------------
+
+def insurance_panel_keyboard(user_id):
+    rows = []
+    if not has_insurance(user_id):
+        rows.append([InlineKeyboardButton(f"🛒 خرید بیمه ({INSURANCE_COST:,} 🪙 / {INSURANCE_DAYS} روز)", callback_data="insp_buy")])
+    rows.append([InlineKeyboardButton("🔄 بروزرسانی", callback_data="insp_home"),
+                 InlineKeyboardButton("🏠 منو", callback_data="home")])
+    return InlineKeyboardMarkup(rows)
+
+def insurance_panel_text(user_id):
+    u = get_user(user_id)
+    until = u["insurance_until"] or 0
+    now = int(time.time())
+    msg = f"🛡️ **بیمه خرستان**\n━━━━━━━━━━━━━━\n👤 {esc_md(u['name'])}\n"
+    if until > now:
+        d, h = (until-now)//86400, ((until-now)%86400)//3600
+        msg += f"✅ **بیمه فعال!** اعتبار: {d} روز و {h} ساعت\n"
+    else:
+        msg += "❌ بیمه نداری — با یه کلیک بیمه شو! 👇\n"
+    msg += (
+        f"\n**مزایا:**\n"
+        f"📉 {int(INSURANCE_REFUND*100)}٪ باخت **همه بازی‌ها** خودکار برمی‌گرده (سقف {INSURANCE_REFUND_CAP:,} در هر باخت)\n"
+        f"🦹 هیچ‌کس نمی‌تونه ازت بدزده!\n"
+        f"💳 قیمت: {INSURANCE_COST:,} {CURRENCY_NAME} برای {INSURANCE_DAYS} روز"
+    )
+    return msg
+
+# ============================================================
+# 🛡️ بیمه خرستان — جبران باخت قمار + سپر دزدی
+# ============================================================
+
+INSURANCE_COST = 2000       # قیمت بیمه‌نامه
+INSURANCE_DAYS = 7          # مدت اعتبار
+INSURANCE_REFUND = 0.30     # ۳۰٪ باخت همه بازی‌ها برمی‌گرده
+INSURANCE_REFUND_CAP = 2000 # سقف جبران هر باخت
+
+def has_insurance(user_id):
+    u = get_user(user_id)
+    return u and (u["insurance_until"] or 0) > int(time.time())
+
+def insurance_refund(user_id, lost_amount):
+    """جبران بخشی از باخت برای بیمه‌شده‌ها — خروجی: مبلغ جبران"""
+    if not has_insurance(user_id) or lost_amount <= 0:
+        return 0
+    refund = min(int(lost_amount * INSURANCE_REFUND), INSURANCE_REFUND_CAP)
+    if refund > 0:
+        add_coins(user_id, refund)
+    return refund
+
+def insurance_text(user_id):
+    u = get_user(user_id)
+    until = u["insurance_until"] or 0
+    now = int(time.time())
+    msg = (
+        f"🛡️ **بیمه خرستان**\n━━━━━━━━━━━━━━\n"
+    )
+    if until > now:
+        days_left = (until - now) // 86400
+        hours_left = ((until - now) % 86400) // 3600
+        msg += f"✅ **بیمه‌ای!** اعتبار: {days_left} روز و {hours_left} ساعت دیگه\n\n"
+    else:
+        msg += "❌ الان بیمه نیستی!\n\n"
+    msg += (
+        f"**مزایای بیمه:**\n"
+        f"📉 {int(INSURANCE_REFUND*100)}٪ باخت‌های قمارت برمی‌گرده (تا سقف {INSURANCE_REFUND_CAP} در هر باخت)\n"
+        f"🦹 دزدها نمی‌تونن ازت بدزدن!\n\n"
+        f"💳 قیمت: **{INSURANCE_COST:,}** {CURRENCY_NAME} برای **{INSURANCE_DAYS} روز**\n"
+        f"🛒 خرید: بنویس `خرید بیمه`"
+    )
+    return msg
+
+async def insurance_buy(update, context):
+    user = update.effective_user
+    if has_insurance(user.id):
+        u = get_user(user.id)
+        days_left = ((u["insurance_until"] or 0) - int(time.time())) // 86400
+        await update.message.reply_text(f"🛡️ همین الانم بیمه‌ای! ({days_left} روز مونده)")
+        return
+    if not remove_coins(user.id, INSURANCE_COST):
+        u = get_user(user.id)
+        await update.message.reply_text(f"❌ بیمه {INSURANCE_COST:,} {CURRENCY_NAME}ه! موجودیت: {u['coins']:,}")
+        return
+    until = int(time.time()) + INSURANCE_DAYS * 86400
+    with closing(db_connect()) as db:
+        db.execute("UPDATE users SET insurance_until = ? WHERE user_id = ?", (until, user.id))
+        db.commit()
+    await update.message.reply_text(
+        f"🛡️ **بیمه‌نامه صادر شد!**\n━━━━━━━━━━━━━━\n"
+        f"✅ {INSURANCE_DAYS} روز تحت پوشش بیمه خرستانی!\n"
+        f"📉 {int(INSURANCE_REFUND*100)}٪ باخت‌های قمارت برمی‌گرده\n"
+        f"🦹 دزدها هم دیگه حریفت نمی‌شن!\n\n"
+        f"💸 هزینه: {INSURANCE_COST:,} {CURRENCY_NAME}",
+        parse_mode="Markdown")
+
+# ============================================================
 # نمایش خر شخصی
 # ============================================================
 
@@ -833,11 +1360,11 @@ def donkey_art(user_id):
 
 # سطح: (اسم سطح، ایموجی، سود روزانه، هزینه ارتقا به این سطح)
 BABY_LEVELS = {
-    1: {"name": "نوزاد",   "emoji": "🐣", "income": 200,  "cost": 0},
-    2: {"name": "کوچولو",  "emoji": "🐤", "income": 400,  "cost": 1000},
-    3: {"name": "نوجوون",  "emoji": "🐥", "income": 800,  "cost": 3000},
-    4: {"name": "جوون",    "emoji": "🐴", "income": 1400, "cost": 8000},
-    5: {"name": "طلایی",   "emoji": "🦄", "income": 2000, "cost": 20000},
+    1: {"name": "نوزاد",   "emoji": "🐣", "income": 500,  "cost": 0},
+    2: {"name": "کوچولو",  "emoji": "🐤", "income": 1000, "cost": 2000},
+    3: {"name": "نوجوون",  "emoji": "🐥", "income": 2000, "cost": 6000},
+    4: {"name": "جوون",    "emoji": "🐴", "income": 3500, "cost": 15000},
+    5: {"name": "طلایی",   "emoji": "🦄", "income": 5000, "cost": 35000},
 }
 BABY_MAX_LEVEL = 5
 BABY_NAME_MAXLEN = 20
@@ -872,6 +1399,33 @@ def save_babies(user_id, babies):
 def babies_daily_income(babies):
     return sum(BABY_LEVELS.get(b.get("level", 1), BABY_LEVELS[1])["income"] for b in babies)
 
+def babies_pending_income(user_id):
+    """💰 سود کره‌خر آماده برداشت — روزی یک بار از پنل. خروجی: (مبلغ, آماده‌ست؟)"""
+    u = get_user(user_id)
+    if not u:
+        return 0, False
+    babies = load_babies(u)
+    if not babies:
+        return 0, False
+    income = babies_daily_income(babies)
+    last = int(get_setting(f"baby_claim_{user_id}", "0") or 0)
+    now = int(time.time())
+    if not last:
+        set_setting(f"baby_claim_{user_id}", str(now))
+        return income, False
+    if now - last < 86400:
+        return income, False
+    return income, True
+
+def babies_claim(user_id):
+    """برداشت سود کره‌خرها — خروجی: مبلغ واریزشده یا 0"""
+    income, ready = babies_pending_income(user_id)
+    if not ready or income <= 0:
+        return 0
+    add_coins(user_id, income)
+    set_setting(f"baby_claim_{user_id}", str(int(time.time())))
+    return income
+
 def baby_line(i, b):
     lv = BABY_LEVELS.get(b.get("level", 1), BABY_LEVELS[1])
     return f"{i}. {lv['emoji']} **{esc_md(b['name'])}** — سطح {b.get('level',1)} ({lv['name']}) | سود روزانه: {lv['income']} {CURRENCY_NAME}"
@@ -902,7 +1456,14 @@ def baby_panel_text(user_id):
         else:
             lines.append(f"   💰 سود: {lv['income']}/روز | 🏆 فول‌لِوِل!")
     total = babies_daily_income(babies)
-    lines.append(f"\n💎 جمع سود روزانه: **{total}** {CURRENCY_NAME}")
+    lines.append(f"\n💎 جمع سود روزانه: **{total:,}** {CURRENCY_NAME}")
+    income, ready = babies_pending_income(user_id)
+    if ready:
+        lines.append(f"💰 **سود آماده برداشته: +{income:,}** — دکمه رو بزن! 🎉")
+    else:
+        last = int(get_setting(f"baby_claim_{user_id}", "0") or 0)
+        remaining = max(0, 86400 - (int(time.time()) - last))
+        lines.append(f"⏳ سود بعدی تا {remaining//3600} ساعت و {(remaining%3600)//60} دقیقه دیگه")
     lines.append(f"💳 موجودیت: {u['coins']:,} {CURRENCY_NAME}")
     lines.append("\n👇 برای ارتقا یا تغییر اسم، دکمه کره‌خر رو بزن:")
     return "\n".join(lines)
@@ -919,6 +1480,9 @@ def baby_panel_keyboard(user_id):
             rows.append(row); row = []
     if row:
         rows.append(row)
+    income, ready = babies_pending_income(user_id)
+    if ready and income > 0:
+        rows.insert(0, [InlineKeyboardButton(f"💰 برداشت سود (+{income:,})", callback_data="babe_claim")])
     rows.append([InlineKeyboardButton("🔄 بروزرسانی", callback_data="babe_home"),
                  InlineKeyboardButton("🏠 منو", callback_data="home")])
     return InlineKeyboardMarkup(rows)
@@ -1488,6 +2052,8 @@ def main_menu():
          InlineKeyboardButton("🏪 فروشگاه", callback_data="shop")],
         [InlineKeyboardButton("🐣 کره‌خرها", callback_data="babe_home"),
          InlineKeyboardButton("🏆 جدول", callback_data="leaderboard")],
+        [InlineKeyboardButton("🏦 بانک", callback_data="bankp_home"),
+         InlineKeyboardButton("🛡️ بیمه", callback_data="insp_home")],
         [InlineKeyboardButton("📖 راهنما", callback_data="help_main")]
     ])
 
@@ -1806,7 +2372,7 @@ async def rps_action(room, context, query, choice):
     loser = p2 if winner == p1 else p1
     add_coins(winner, room.pot())
     record_win(winner)
-    record_loss(loser)
+    record_loss(loser, room.bet)
     await finish_game(room, context, header + f"🏆 برنده: **{uname(winner)}**\n💰 جایزه: {room.pot()} {CURRENCY_NAME}")
 
 # ------------------------------------------------------------
@@ -1901,7 +2467,7 @@ async def ttt_check_end(room, context):
         loser = p2 if winner == p1 else p1
         add_coins(winner, room.pot())
         record_win(winner)
-        record_loss(loser)
+        record_loss(loser, room.bet)
         board_txt = "\n".join("".join(gd["board"][j] if gd["board"][j] else "⬜" for j in range(i, i+3)) for i in range(0, 9, 3))
         await finish_game(room, context,
             f"❌⭕ **دوز — پایان**\n━━━━━━━━━━━━━━\n{board_txt}\n\n"
@@ -1982,7 +2548,7 @@ async def coinflip_run(room, context):
     loser = p2 if winner == p1 else p1
     add_coins(winner, room.pot())
     record_win(winner)
-    record_loss(loser)
+    record_loss(loser, room.bet)
     
     await finish_game(room, context,
         f"🪙 **شیر یا خط — نتیجه**\n━━━━━━━━━━━━━━\n"
@@ -2090,7 +2656,7 @@ async def emoji_game_finish(room, context):
         record_win(w)
     for p in room.players:
         if p not in winners:
-            record_loss(p)
+            record_loss(p, room.bet)
     
     win_names = "، ".join(uname(w) for w in winners)
     result_note = "🤝 مساوی — تقسیم جایزه!\n" if len(winners) > 1 else ""
@@ -2211,7 +2777,7 @@ async def guessnum_process(room, context, uid, guess):
         record_win(uid)
         for p in room.players:
             if p != uid:
-                record_loss(p)
+                record_loss(p, room.bet)
         gd["history"].append(f"{guess}✅")
         await finish_game(room, context,
             f"🔢 **حدس عدد — پایان!**\n━━━━━━━━━━━━━━\n"
@@ -2337,7 +2903,7 @@ async def mines_open(room, context, uid, box):
             record_win(winner)
             for p in room.players:
                 if p != winner:
-                    record_loss(p)
+                    record_loss(p, room.bet)
             await finish_game(room, context,
                 f"💣 **مین‌روب — پایان!**\n━━━━━━━━━━━━━━\n"
                 f"💥 **بوووم!** {uname(uid)} جعبه {box+1} رو باز کرد و منفجر شد! ☠️\n\n"
@@ -2438,7 +3004,7 @@ async def roulette_next_round(room, context, extra):
         record_win(winner)
         for p in room.players:
             if p != winner:
-                record_loss(p)
+                record_loss(p, room.bet)
         await finish_game(room, context,
             f"🔫 **رولت روسی — پایان**\n━━━━━━━━━━━━━━\n"
             f"{extra}\n"
@@ -2536,7 +3102,7 @@ async def poker_run(room, context):
         record_win(w)
     for p in room.players:
         if p not in winners:
-            record_loss(p)
+            record_loss(p, room.bet)
     
     win_names = "، ".join(uname(w) for w in winners)
     await finish_game(room, context,
@@ -2625,7 +3191,7 @@ async def bj_dealer_and_finish(room, context):
         v = bj_value(h)
         if v > 21:
             res = "💀 باخت (سوخت)"
-            record_loss(p)
+            record_loss(p, room.bet)
         elif dv > 21 or v > dv:
             prize = room.bet * 2
             add_coins(p, prize)
@@ -2635,7 +3201,7 @@ async def bj_dealer_and_finish(room, context):
             add_coins(p, room.bet)
             res = "🤝 مساوی (برگشت شرط)"
         else:
-            record_loss(p)
+            record_loss(p, room.bet)
             res = "💀 باخت"
         lines.append(f"👤 {uname(p)}: {hand_str(h)} = {v} → {res}")
     
@@ -2743,7 +3309,7 @@ async def crash_loop(room, context):
                         record_win(p)
                     else:
                         lines.append(f"☠️ {uname(p)}: سوخت! -{room.bet} {CURRENCY_NAME}")
-                        record_loss(p)
+                        record_loss(p, room.bet)
                 await finish_game(room, context, "\n".join(lines))
                 return
             
@@ -2844,7 +3410,7 @@ async def hilo_action(room, context, query, pick):
             record_win(p)
             lines.append(f"🏆 {uname(p)}: {HILO_NAMES[pick]} → +{prize} {CURRENCY_NAME}")
         else:
-            record_loss(p)
+            record_loss(p, room.bet)
             lines.append(f"💀 {uname(p)}: {HILO_NAMES[pick]} → -{room.bet} {CURRENCY_NAME}")
     
     await finish_game(room, context, "\n".join(lines))
@@ -2929,8 +3495,10 @@ async def slot_game(update, context, bet):
         record_win(user.id)
         result = f"✨ دوتایی! 💰 بردی: **+{prize}** {CURRENCY_NAME} (x2)"
     else:
-        record_loss(user.id)
+        ref = record_loss(user.id, bet)
         result = f"💀 باختی! **-{bet}** {CURRENCY_NAME}"
+        if ref:
+            result += f"\n🛡️ بیمه {ref} {CURRENCY_NAME} برگردوند!"
     
     await update.message.reply_text(
         f"🎰 **اسلات خرستان**\n━━━━━━━━━━━━━━\n"
@@ -2952,8 +3520,10 @@ async def double_game(update, context, bet):
         record_win(user.id)
         result = f"🎉 **دوبل شد!** بردی: **+{prize}** {CURRENCY_NAME}"
     else:
-        record_loss(user.id)
+        ref = record_loss(user.id, bet)
         result = f"💀 سوخت! باختی: **-{bet}** {CURRENCY_NAME}"
+        if ref:
+            result += f"\n🛡️ بیمه {ref} {CURRENCY_NAME} برگردوند!"
     
     await update.message.reply_text(
         f"🎲 **دوبل یا هیچی**\n━━━━━━━━━━━━━━\n"
@@ -3204,7 +3774,8 @@ def import_db_json(data):
     
     user_cols = ["user_id","name","coins","level","wins","losses","is_banned","created_at",
                  "last_mate","babies","baby_names","last_sound","last_daily",
-                 "last_work","last_wheel","last_rob","last_fortune","sound_count"]
+                 "last_work","last_wheel","last_rob","last_fortune","sound_count",
+                 "bank_balance","bank_last","insurance_until"]
     donkey_cols = ["user_id","equipped_hat","equipped_saddle","equipped_horseshoe",
                    "equipped_tie","equipped_clothes","equipped_accessory"]
     
@@ -3509,14 +4080,21 @@ HELP_SECTIONS = {
     "help_money": (
         "💰 **راه‌های پول درآوردن:**\n"
         "━━━━━━━━━━━━━━\n"
-        "🎁 `روزانه` — جایزه روزانه (هر ۲۴ ساعت)\n"
-        "💼 `کار` — برو سر کار، دستمزد بگیر (هر ۱ ساعت)\n"
-        "🎡 `گردونه` — گردونه شانس، تا ۵۰۰۰ جایزه! (هر ۳ ساعت)\n"
-        "🔮 `فال` — فالت رو بگیر + برکت (هر ۶ ساعت)\n"
-        "🔊 عرعر کن! — هر صدا پوینت داره (هر ۲ دقیقه)\n"
+        "🎁 `روزانه` — جایزه ۵۰۰ تا ۱۵۰۰ (هر ۲۴ ساعت)\n"
+        "💼 `کار` — دستمزد تا ۹۰۰! (هر ۳۰ دقیقه)\n"
+        "🎡 `گردونه` — تا ۱۰٬۰۰۰ جایزه! (هر ۳ ساعت)\n"
+        "🔮 `فال` — فال + برکت تا ۲۰۰ (هر ۶ ساعت)\n"
+        "🔊 عرعر کن! — هر صدا ۱۵۰ تا ۱۲۰۰ شانسی (هر ۲ دقیقه)\n"
         "🦹 `دزدی` (با ریپلی) — ۴۰٪ شانس، ولی جریمه داره! (هر ۲ ساعت)\n"
         "💸 `انتقال 100` (با ریپلی) — سکه بده به رفیقت\n\n"
-        "⚠️ مواظب باش: توی دزدی اگه گیر بیفتی جریمه می‌شی!"
+        "🏦 **بانک خرستان:**\n"
+        "`بانک` — حسابت | `واریز 1000` | `برداشت همه`\n"
+        "💹 `سود` — روزی **۳۰٪ سود**! ⚠️ هر روز باید خودت برداری وگرنه می‌سوزه!\n"
+        "💳 `وام 5000` (ریپلی روی ضامن سطح ۲+) — وام تا ۱۰هزار برای فقرا | `تسویه وام`\n"
+        "🛡️ پولت توی بانک از دزدی در امانه!\n\n"
+        "🛡️ **بیمه خرستان:**\n"
+        "`بیمه` — وضعیت | `خرید بیمه` — ۲۰۰۰ برای ۷ روز\n"
+        "📉 ۳۰٪ باخت **همه بازی‌ها** خودکار برمی‌گرده + دزدها حریفت نمی‌شن!"
     ),
     "help_sounds": SOUNDS_LIST_TEXT,
     "help_donkey": (
@@ -3528,9 +4106,9 @@ HELP_SECTIONS = {
         "❤️ `جفت‌گیری` یا `جفتگیری` (با ریپلی) — کره‌خر دار شو! (سطح ۲ لازمه، ۵۰۰ سکه)\n"
         "💌 طرف مقابل باید با دکمه «قبوله!» موافقت کنه وگرنه انجام نمی‌شه\n"
         "🐣 `کره‌خرها` — پنل کره‌خرها با دکمه: ارتقا، سود، تغییر اسم\n"
-        "⬆️ `ارتقا کره‌خر 1` — ارتقا بده تا سود بیشتری بده (تا ۲۰۰۰ در روز!)\n"
+        "⬆️ `ارتقا کره‌خر 1` — ارتقا بده تا سود بیشتری بده (تا ۵۰۰۰ در روز!)\n"
         "📛 `اسم کره‌خر 1 فلفلی` — اسم دلخواه بذار\n"
-        "💰 سود کره‌خرها خودکار همراه «روزانه» پرداخت می‌شه\n"
+        "💰 سود کره‌خرها رو هر روز از پنل `کره‌خرها` با دکمه بردار!\n"
         "⭐ با پول بیشتر، سطح و لقبت بالاتر می‌ره:\n"
         "🐣 کره‌خر تازه‌کار → ... → 👑 خدا خرها"
     ),
@@ -3665,9 +4243,11 @@ FJ_KNOWN_CMDS = {
     "فال", "fortune", "طالع", "دزدی", "سرقت", "rob",
     "خرم", "خر من", "donkey", "کره‌خرها", "کره خرها", "کره‌خر", "کره خر",
     "babies", "پنل کره‌خر", "پنل کره خر",
-    "لغو بازی", "لغوبازی", "خروج از بازی", "cancelgame"
+    "لغو بازی", "لغوبازی", "خروج از بازی", "cancelgame",
+    "بانک", "bank", "حساب بانکی", "بیمه", "insurance", "خرید بیمه", "خریدبیمه", "بیمه بخر",
+    "سود", "سود بانک", "برداشت سود", "تسویه وام", "تسویه‌وام", "تسویه"
 }
-FJ_FIRST_WORD_CMDS = {"اسلات", "slot", "دوبل", "double", "انتقال", "transfer", "هدیه", "ارتقا", "اسم", "خرجان", "خردانا"}
+FJ_FIRST_WORD_CMDS = {"اسلات", "slot", "دوبل", "double", "انتقال", "transfer", "هدیه", "ارتقا", "اسم", "خرجان", "خردانا", "واریز", "برداشت", "deposit", "withdraw", "وام", "loan"}
 
 def looks_like_bot_command(update, context, text):
     """تشخیص اینکه پیام، دستور ربات است یا چت عادی گروه"""
@@ -3753,6 +4333,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 🔒 جوین اجباری — بدون عضویت هیچ دستوری کار نمی‌کنه
     if not await force_join_gate(update, context, user.id):
         return
+    
+    # 💳 وصول خودکار قسط وام (روزی یک قسط — نداشت از ضامن! 😂)
+    try:
+        events = loan_collect_due(user.id)
+        for ev in events:
+            if ev[0] == "guarantor" and ev[3] > 0:
+                _, due, from_self, from_g = ev
+                debt_left = get_loan(user.id)
+                await update.message.reply_text(
+                    f"💳 **قسط وام وصول شد!** 😂\n"
+                    f"👤 {esc_md(user.first_name)} پول قسط ({due:,}) رو نداشت!\n"
+                    f"💸 {from_g:,} {CURRENCY_NAME} از جیب **ضامن** بدبختش کم شد! 🤣\n"
+                    f"📊 باقی بدهی: {debt_left:,}",
+                    parse_mode="Markdown")
+                break  # فقط یه پیام، اسپم نشه
+    except Exception as e:
+        logger.warning(f"⚠️ خطا در وصول قسط: {e}")
     
     # 🔢 عدد برای بازی حدس عدد فعال؟
     if await guessnum_text_received(update, context):
@@ -3996,6 +4593,59 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(parts_kd) >= 2 and parts_kd[0] == "خر" and parts_kd[1] in ["جان", "دانا"]:
         q = text.split(None, 2)
         await khar_dana_command(update, context, q[2] if len(q) > 2 else "")
+        return
+    
+    # ===== 🏦 پنل بانک =====
+    if text in ["بانک", "bank", "حساب بانکی", "پنل بانک"]:
+        await reply_menu(update, bank_panel_text(user.id), bank_panel_keyboard(user.id))
+        return
+    
+    parts_bank = text.split()
+    if parts_bank and parts_bank[0] in ["واریز", "deposit"]:
+        if len(parts_bank) < 2 or not parts_bank[1].translate(FA_DIGITS).isdigit():
+            await update.message.reply_text("🏦 روش استفاده: `واریز 1000`", parse_mode="Markdown")
+            return
+        await bank_deposit(update, context, int(parts_bank[1].translate(FA_DIGITS)))
+        return
+    
+    # 💹 برداشت سود روزانه
+    if text in ["سود", "سود بانک", "برداشت سود"]:
+        await bank_claim_interest(update, context)
+        return
+    
+    # 💳 وام
+    if parts_bank and parts_bank[0] in ["وام", "loan"]:
+        if len(parts_bank) < 2 or not parts_bank[1].translate(FA_DIGITS).isdigit():
+            await update.message.reply_text(
+                f"💳 روش استفاده: روی پیام **ضامن** (سطح {LOAN_GUARANTOR_LEVEL}+) ریپلی بزن و بنویس `وام 5000`\n"
+                f"شرایط: پول نقدت زیر {LOAN_NEED_BELOW:,} باشه | سقف: {LOAN_MAX:,}",
+                parse_mode="Markdown")
+            return
+        await loan_request(update, context, int(parts_bank[1].translate(FA_DIGITS)))
+        return
+    
+    if text in ["تسویه وام", "تسویه‌وام", "تسویه"]:
+        await loan_repay(update, context)
+        return
+    
+    if parts_bank and parts_bank[0] in ["برداشت", "withdraw"]:
+        if len(parts_bank) < 2:
+            await update.message.reply_text("🏦 روش استفاده: `برداشت 1000` یا `برداشت همه`", parse_mode="Markdown")
+            return
+        arg = parts_bank[1].translate(FA_DIGITS)
+        if not (arg.isdigit() or arg in ["همه", "کل", "all"]):
+            await update.message.reply_text("🏦 روش استفاده: `برداشت 1000` یا `برداشت همه`", parse_mode="Markdown")
+            return
+        await bank_withdraw(update, context, arg)
+        return
+    
+    # ===== 🛡️ پنل بیمه =====
+    if text in ["بیمه", "insurance", "پنل بیمه"]:
+        await reply_menu(update, insurance_panel_text(user.id), insurance_panel_keyboard(user.id))
+        return
+    
+    if text in ["خرید بیمه", "خریدبیمه", "بیمه بخر"]:
+        await insurance_buy(update, context)
         return
     
     # ===== نمایش خر =====
@@ -4358,6 +5008,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ هنوز عضو نشدی! اول جوین شو بعد این دکمه رو بزن.", show_alert=True)
         return
     
+    # ===== 💳 جواب ضامن وام =====
+    if data in ["loan_yes", "loan_no"]:
+        await loan_callback(update, context, query, "yes" if data == "loan_yes" else "no")
+        return
+    
     # ===== 💌 جواب درخواست جفت‌گیری (فقط طرف مقابل) =====
     if data in ["mate_yes", "mate_no"]:
         await mate_callback(update, context, query, "yes" if data == "mate_yes" else "no")
@@ -4647,6 +5302,107 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # ===== پروفایل =====
+    # ===== 🏦 پنل بانک =====
+    if data == "bankp_home":
+        await query.edit_message_text(bank_panel_text(user.id),
+            reply_markup=bank_panel_keyboard(user.id), parse_mode="Markdown")
+        return
+    
+    if data == "bankp_claim":
+        u = get_user(user.id)
+        interest, ready = bank_pending_interest(user.id)
+        if not ready or interest <= 0:
+            await query.answer("⏳ سودت هنوز نرسیده!", show_alert=True)
+            return
+        add_coins(user.id, interest)
+        with closing(db_connect()) as db:
+            db.execute("UPDATE users SET bank_last = ? WHERE user_id = ?", (int(time.time()), user.id))
+            db.commit()
+        await query.answer(f"💹 +{interest:,} {CURRENCY_NAME} سود گرفتی!", show_alert=True)
+        await query.edit_message_text(bank_panel_text(user.id),
+            reply_markup=bank_panel_keyboard(user.id), parse_mode="Markdown")
+        return
+    
+    if data == "bankp_dep":
+        await query.answer()
+        await query.edit_message_text(
+            bank_panel_text(user.id) + "\n\n💰 **برای واریز بنویس:** `واریز 1000`",
+            reply_markup=bank_panel_keyboard(user.id), parse_mode="Markdown")
+        return
+    
+    if data == "bankp_wd_all":
+        u = get_user(user.id)
+        balance = u["bank_balance"] or 0
+        if balance <= 0:
+            await query.answer("🏦 حسابت خالیه!", show_alert=True)
+            return
+        with closing(db_connect()) as db:
+            db.execute("UPDATE users SET bank_balance = 0 WHERE user_id = ?", (user.id,))
+            db.commit()
+        add_coins(user.id, balance)
+        await query.answer(f"💵 {balance:,} {CURRENCY_NAME} اومد تو جیبت!", show_alert=True)
+        await query.edit_message_text(bank_panel_text(user.id),
+            reply_markup=bank_panel_keyboard(user.id), parse_mode="Markdown")
+        return
+    
+    if data == "bankp_repay":
+        loan = get_loan(user.id)
+        if loan <= 0:
+            await query.answer("✅ بدهی نداری!", show_alert=True)
+            return
+        u = get_user(user.id)
+        pay = min(loan, u["coins"] or 0)
+        if pay <= 0:
+            await query.answer(f"❌ پول نقد نداری! بدهی: {loan:,}", show_alert=True)
+            return
+        remove_coins(user.id, pay)
+        if loan - pay <= 0:
+            clear_loan(user.id)
+            await query.answer(f"🎉 وام کامل تسویه شد! (-{pay:,})", show_alert=True)
+        else:
+            set_loan(user.id, loan - pay)
+            await query.answer(f"💸 {pay:,} پرداخت شد. باقی: {get_loan(user.id):,}", show_alert=True)
+        await query.edit_message_text(bank_panel_text(user.id),
+            reply_markup=bank_panel_keyboard(user.id), parse_mode="Markdown")
+        return
+    
+    # ===== 🛡️ پنل بیمه =====
+    if data == "insp_home":
+        await query.edit_message_text(insurance_panel_text(user.id),
+            reply_markup=insurance_panel_keyboard(user.id), parse_mode="Markdown")
+        return
+    
+    if data == "insp_buy":
+        if has_insurance(user.id):
+            await query.answer("🛡️ همین الانم بیمه‌ای!", show_alert=True)
+            return
+        if not remove_coins(user.id, INSURANCE_COST):
+            u = get_user(user.id)
+            await query.answer(f"❌ {INSURANCE_COST:,} لازمه! داری: {u['coins']:,}", show_alert=True)
+            return
+        until = int(time.time()) + INSURANCE_DAYS * 86400
+        with closing(db_connect()) as db:
+            db.execute("UPDATE users SET insurance_until = ? WHERE user_id = ?", (until, user.id))
+            db.commit()
+        await query.answer(f"🛡️ بیمه شدی! {INSURANCE_DAYS} روز تحت پوششی 🎉", show_alert=True)
+        await query.edit_message_text(insurance_panel_text(user.id),
+            reply_markup=insurance_panel_keyboard(user.id), parse_mode="Markdown")
+        return
+    
+    # ===== 🐣 برداشت سود کره‌خرها =====
+    if data == "babe_claim":
+        got = babies_claim(user.id)
+        if got > 0:
+            await query.answer(f"💰 +{got:,} {CURRENCY_NAME} سود کره‌خرها! 🎉", show_alert=True)
+        else:
+            await query.answer("⏳ سودت هنوز نرسیده! روزی یه بار می‌تونی برداری.", show_alert=True)
+        try:
+            await query.edit_message_text(baby_panel_text(user.id),
+                reply_markup=baby_panel_keyboard(user.id), parse_mode="Markdown")
+        except Exception:
+            pass
+        return
+    
     # ===== 🐣 پنل کره‌خرها =====
     if data == "babe_home":
         await query.edit_message_text(
