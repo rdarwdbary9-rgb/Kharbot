@@ -282,8 +282,10 @@ def profile_text(user_id):
     msg = (
         f"{title} 👤 **پروفایل {esc_md(u['name'])}**\n"
         f"━━━━━━━━━━━━━━\n"
+        f"🆔 آیدی عددی: `{u['user_id']}`\n"
         f"⭐ سطح: {level}\n"
         f"🪙 {CURRENCY_NAME}: {u['coins']:,}\n"
+        f"🏦 بانک: {(u['bank_balance'] or 0):,}\n"
         f"🏆 برد: {u['wins']} | 💀 باخت: {u['losses']}\n"
     )
     
@@ -422,13 +424,7 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
     now = int(time.time())
     
     if now - last_sound < SOUND_COOLDOWN:
-        remaining = SOUND_COOLDOWN - (now - last_sound)
-        minutes = remaining // 60
-        seconds = remaining % 60
-        await update.message.reply_text(
-            f"⏳ حنجره‌ات خسته‌ست! {minutes} دقیقه و {seconds} ثانیه استراحت بده 🐴💤"
-        )
-        return
+        return  # 🔇 کول‌داون: بی‌صدا نادیده بگیر
     
     # طولانی‌ترین کلید منطبق را پیدا کن (عرخفن قبل از عر)
     keyword = None
@@ -757,37 +753,78 @@ async def fortune_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 TRANSFER_MIN = 10
 TRANSFER_MAX = 50000
 
-async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE, amount):
+def find_user_by_ref(ref):
+    """پیدا کردن کاربر با آیدی عددی یا یوزرنیم/اسم — خروجی: ردیف کاربر یا None"""
+    ref = ref.strip()
+    with closing(db_connect()) as db:
+        # آیدی عددی
+        num = ref.translate(FA_DIGITS)
+        if num.isdigit():
+            return db.execute("SELECT * FROM users WHERE user_id = ?", (int(num),)).fetchone()
+        # یوزرنیم یا اسم (بدون @) — جستجو توی اسم‌های ثبت‌شده
+        name = ref.lstrip("@")
+        row = db.execute("SELECT * FROM users WHERE name = ? COLLATE NOCASE", (name,)).fetchone()
+        if row:
+            return row
+        # جستجوی جزئی
+        return db.execute("SELECT * FROM users WHERE name LIKE ? COLLATE NOCASE LIMIT 1", (f"%{name}%",)).fetchone()
+
+async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE, amount, target_ref=None):
+    """💸 انتقال تی‌تاپ — با ریپلی یا با آیدی عددی/اسم: «انتقال 100 123456» یا «انتقال 100 @علی»"""
     user = update.effective_user
     ensure_user(user.id, user.first_name)
     
-    if not update.message.reply_to_message:
-        await update.message.reply_text("💸 روی پیام طرف **ریپلی** بزن و بنویس: `انتقال 100`", parse_mode="Markdown")
+    target_id = None
+    target_name = None
+    
+    if update.message.reply_to_message:
+        # حالت ۱: ریپلی
+        target = update.message.reply_to_message.from_user
+        if target.is_bot:
+            await update.message.reply_text("❌ ربات پول نمی‌خواد! 🤖")
+            return
+        ensure_user(target.id, target.first_name)
+        target_id, target_name = target.id, target.first_name
+    elif target_ref:
+        # حالت ۲: آیدی عددی یا اسم/یوزرنیم
+        row = find_user_by_ref(target_ref)
+        if not row:
+            await update.message.reply_text(
+                f"❌ کاربری با «{esc_md(target_ref)}» پیدا نشد!\n"
+                f"💡 فقط کسایی که قبلاً با ربات کار کردن قابل پیدا شدنن.\n"
+                f"🔢 آیدی عددی هر کس توی «👑 دیتابیس بازیکنان» یا با ریپلی + پروفایل معلومه.",
+                parse_mode="Markdown")
+            return
+        target_id, target_name = row["user_id"], row["name"]
+    else:
+        await update.message.reply_text(
+            "💸 **روش‌های انتقال:**\n"
+            "1️⃣ ریپلی روی پیام طرف + `انتقال 100`\n"
+            "2️⃣ با آیدی عددی: `انتقال 100 123456789`\n"
+            "3️⃣ با اسم: `انتقال 100 @علی`",
+            parse_mode="Markdown")
         return
     
-    target = update.message.reply_to_message.from_user
-    if target.id == user.id:
+    if target_id == user.id:
         await update.message.reply_text("❌ به خودت می‌خوای پول بدی؟! 😂")
         return
-    if target.is_bot:
-        await update.message.reply_text("❌ ربات پول نمی‌خواد! 🤖")
+    if target_id == BOT_ID:
+        await update.message.reply_text("❌ خر بات پول نمی‌خواد! 🤖")
         return
     
     if amount < TRANSFER_MIN or amount > TRANSFER_MAX:
         await update.message.reply_text(f"❌ مبلغ باید بین {TRANSFER_MIN} تا {TRANSFER_MAX:,} باشه!")
         return
     
-    ensure_user(target.id, target.first_name)
-    
     if not remove_coins(user.id, amount):
         u = get_user(user.id)
         await update.message.reply_text(f"❌ موجودی کافی نداری! داری: {u['coins']:,} {CURRENCY_NAME}")
         return
     
-    add_coins(target.id, amount)
+    add_coins(target_id, amount)
     await update.message.reply_text(
         f"💸 **انتقال موفق!**\n━━━━━━━━━━━━━━\n"
-        f"👤 {esc_md(user.first_name)} ⬅️ {esc_md(target.first_name)}\n"
+        f"👤 {esc_md(user.first_name)} ⬅️ {esc_md(target_name)}\n"
         f"💰 مبلغ: **{amount:,}** {CURRENCY_NAME}\n\n"
         f"🤝 دمت گرم، رفاقت یعنی این!",
         parse_mode="Markdown"
@@ -2024,18 +2061,28 @@ async def show_room_status(room: GameRoom, context: ContextTypes.DEFAULT_TYPE, q
         logger.warning(f"⚠️ خطا در ویرایش پیام اتاق: {e}")
 
 async def edit_room_msg(room: GameRoom, context, text, keyboard=None):
-    """ویرایش امن پیام اصلی بازی"""
-    try:
-        await context.bot.edit_message_text(
-            text,
-            chat_id=room.chat_id,
-            message_id=room.message_id,
-            reply_markup=keyboard,
-            parse_mode="Markdown"
-        )
-    except Exception as e:
-        if "not modified" not in str(e).lower():
-            logger.warning(f"⚠️ خطا در ویرایش پیام بازی: {e}")
+    """ویرایش امن پیام اصلی بازی — مقاوم در برابر Flood Control تلگرام"""
+    for attempt in range(2):
+        try:
+            await context.bot.edit_message_text(
+                text,
+                chat_id=room.chat_id,
+                message_id=room.message_id,
+                reply_markup=keyboard,
+                parse_mode="Markdown"
+            )
+            return
+        except Exception as e:
+            err = str(e)
+            # 🚦 flood خوردیم؟ صبر کن و یه بار دیگه امتحان کن
+            retry_after = getattr(e, "retry_after", None)
+            if retry_after and attempt == 0:
+                logger.warning(f"🚦 Flood control: {retry_after}s صبر می‌کنم...")
+                await asyncio.sleep(min(float(retry_after) + 1, 30))
+                continue
+            if "not modified" not in err.lower():
+                logger.warning(f"⚠️ خطا در ویرایش پیام بازی: {e}")
+            return
 
 def result_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🎮 بازی جدید", callback_data="games_list"),
@@ -2064,6 +2111,9 @@ def games_menu():
     for i in range(0, len(keys), 2):
         row = [InlineKeyboardButton(GAME_NAMES[k], callback_data=f"game_{k}") for k in keys[i:i+2]]
         buttons.append(row)
+    # 🎰 بازی‌های فوری تکی (بدون اتاق)
+    buttons.append([InlineKeyboardButton("🎰 اسلات", callback_data="instant_slot"),
+                    InlineKeyboardButton("🎲 دوبل", callback_data="instant_double")])
     buttons.append([InlineKeyboardButton("🔙 بازگشت", callback_data="home")])
     return InlineKeyboardMarkup(buttons)
 
@@ -3285,8 +3335,7 @@ async def crash_loop(room, context):
     gd = room.game_data
     try:
         while True:
-            await asyncio.sleep(2)
-            # اگر اتاق پاک شده، تمام
+            await asyncio.sleep(3)  # ⏱️ ۳ ثانیه — که تلگرام flood نگیره
             if ACTIVE_ROOMS.get(room.room_id) is not room or room.finished:
                 return
             
@@ -3471,14 +3520,80 @@ async def game_action_router(update, context, query, data):
 
 SLOT_SYMBOLS = ["🍒", "🍋", "🍇", "🔔", "💎", "7️⃣"]
 
+# ⏳ صف بازی‌های فوری: اسپم کنی، پیام‌هات دونه‌دونه هر ۲ ثانیه جواب داده می‌شن
+INSTANT_GAME_GAP = 2          # فاصله بین هر بازی (ثانیه)
+INSTANT_QUEUE_MAX = 5         # حداکثر ۵ تا پیام تو صف هر نفر — بیشترش دور ریخته می‌شه
+_INSTANT_NEXT_FREE = {}       # {user_id: زمانی که نوبت بعدی آزاد می‌شه}
+_INSTANT_QUEUED = {}          # {user_id: تعداد پیام‌های در صف}
+
+def instant_game_delay(user_id):
+    """⏱️ خروجی: چند ثانیه صبر کنه تا نوبتش بشه (۰ = همین الان)
+    None یعنی صف پره و این پیام کلاً دور ریخته بشه."""
+    now = time.time()
+    next_free = _INSTANT_NEXT_FREE.get(user_id, 0)
+    if now >= next_free:
+        # آزاده — همین الان بازی کن، نوبت بعدی ۲ ثانیه دیگه
+        _INSTANT_NEXT_FREE[user_id] = now + INSTANT_GAME_GAP
+        # پاکسازی
+        if len(_INSTANT_NEXT_FREE) > 3000:
+            for k in [k for k, v in _INSTANT_NEXT_FREE.items() if v < now][:1000]:
+                _INSTANT_NEXT_FREE.pop(k, None)
+                _INSTANT_QUEUED.pop(k, None)
+        return 0
+    # مشغوله — بره تو صف (اگه جا باشه)
+    queued = _INSTANT_QUEUED.get(user_id, 0)
+    if queued >= INSTANT_QUEUE_MAX:
+        return None  # صف پره، بی‌صدا دور بریز
+    _INSTANT_QUEUED[user_id] = queued + 1  # 📬 همین‌جا جاش رزرو می‌شه
+    delay = next_free - now
+    _INSTANT_NEXT_FREE[user_id] = next_free + INSTANT_GAME_GAP
+    return delay
+
+async def _instant_run_later(user_id, delay, coro_fn):
+    """اجرای بازی بعد از تاخیر صف"""
+    try:
+        await asyncio.sleep(delay)
+        await coro_fn()
+    except Exception as e:
+        logger.warning(f"⚠️ خطا در صف بازی فوری: {e}")
+    finally:
+        _INSTANT_QUEUED[user_id] = max(0, _INSTANT_QUEUED.get(user_id, 0) - 1)
+
+# 🎲 شانس برد بازی‌های فوری: ۳۵٪ برد / ۶۵٪ باخت
+INSTANT_WIN_CHANCE = 0.35
+
 async def slot_game(update, context, bet):
+    user = update.effective_user
+    delay = instant_game_delay(user.id)
+    if delay is None:
+        return  # صف پره — بی‌صدا دور بریز
+    if delay > 0:
+        # 📬 تو صف — بعد از نوبتش خودکار اجرا می‌شه
+        context.application.create_task(
+            _instant_run_later(user.id, delay, lambda: _slot_play(update, context, bet)))
+        return
+    await _slot_play(update, context, bet)
+
+async def _slot_play(update, context, bet):
     user = update.effective_user
     if not remove_coins(user.id, bet):
         u = get_user(user.id)
         await update.message.reply_text(f"❌ پول کافی نداری! موجودی: {u['coins']:,} {CURRENCY_NAME}")
         return
     
-    reels = [random.choice(SLOT_SYMBOLS) for _ in range(3)]
+    # 🎲 شانس برد ۳۵٪ — بعد حلقه‌های متناسب با نتیجه ساخته می‌شن
+    if random.random() < INSTANT_WIN_CHANCE:
+        # برد: ۱۵٪ شانس جکپات سه‌تایی، بقیه دوتایی
+        if random.random() < 0.15:
+            sym = random.choices(SLOT_SYMBOLS, weights=[30, 25, 20, 12, 8, 5])[0]
+            reels = [sym, sym, sym]
+        else:
+            sym = random.choice(SLOT_SYMBOLS)
+            other = random.choice([s for s in SLOT_SYMBOLS if s != sym])
+            reels = random.choice([[sym, sym, other], [other, sym, sym], [sym, other, sym]])
+    else:
+        # باخت: سه تا نماد متفاوت
+        reels = random.sample(SLOT_SYMBOLS, 3)
     line = " | ".join(reels)
     
     if reels[0] == reels[1] == reels[2]:
@@ -3509,12 +3624,23 @@ async def slot_game(update, context, bet):
 
 async def double_game(update, context, bet):
     user = update.effective_user
+    delay = instant_game_delay(user.id)
+    if delay is None:
+        return  # صف پره — بی‌صدا دور بریز
+    if delay > 0:
+        context.application.create_task(
+            _instant_run_later(user.id, delay, lambda: _double_play(update, context, bet)))
+        return
+    await _double_play(update, context, bet)
+
+async def _double_play(update, context, bet):
+    user = update.effective_user
     if not remove_coins(user.id, bet):
         u = get_user(user.id)
         await update.message.reply_text(f"❌ پول کافی نداری! موجودی: {u['coins']:,} {CURRENCY_NAME}")
         return
     
-    if random.random() < 0.5:
+    if random.random() < INSTANT_WIN_CHANCE:
         prize = bet * 2
         add_coins(user.id, prize)
         record_win(user.id)
@@ -4014,7 +4140,7 @@ async def do_broadcast(update, context, send_fn):
             # چت‌هایی که ربات ازشون حذف شده رو پاک کن
             if "blocked" in err or "kicked" in err or "not found" in err or "deactivated" in err:
                 dead_chats.append(ch["chat_id"])
-        await asyncio.sleep(0.1)  # رعایت محدودیت تلگرام (۳۰ پیام/ثانیه)
+        await asyncio.sleep(0.5)  # رعایت محدودیت تلگرام — آروم‌تر که flood نگیره
     
     if dead_chats:
         with closing(db_connect()) as db:
@@ -4071,7 +4197,7 @@ HELP_SECTIONS = {
         "💣 `مین 100` — جعبه بمب‌دار رو باز نکن! حذفی (تا ۱۰ نفر)\n\n"
         "🎰 **بازی فوری تکی:**\n"
         "`اسلات 100` — سه‌تایی 7️⃣ = x20 جکپات!\n"
-        "`دوبل 100` — شانس ۵۰-۵۰، دوبل یا هیچی!\n\n"
+        "`دوبل 100` — دوبل یا هیچی!\n\n"
         "💡 بازی‌های ۲ نفره با ورود نفر دوم خودکار شروع می‌شن.\n"
         "💡 می‌تونی فقط اسم بازی رو بنویسی (مثلاً `انفجار`) تا ربات مبلغ شرط رو ازت بپرسه.\n"
         "⏰ اگه بازی تا ۵ دقیقه شروع نشه، خودکار لغو می‌شه و شرط‌ها برمی‌گرده.\n"
@@ -4657,13 +4783,20 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts_tr = text.split()
     if parts_tr and parts_tr[0] in ["انتقال", "transfer", "هدیه"]:
         if len(parts_tr) < 2:
-            await update.message.reply_text("💸 روش استفاده: روی پیام طرف ریپلی بزن و بنویس `انتقال 100`", parse_mode="Markdown")
+            await update.message.reply_text(
+                "💸 **روش‌های انتقال:**\n"
+                "1️⃣ ریپلی + `انتقال 100`\n"
+                "2️⃣ با آیدی عددی: `انتقال 100 123456789`\n"
+                "3️⃣ با اسم: `انتقال 100 @علی`",
+                parse_mode="Markdown")
             return
         val = parts_tr[1].translate(FA_DIGITS)
         if not val.isdigit():
             await update.message.reply_text("❌ مبلغ باید عدد باشه! مثال: `انتقال 100`", parse_mode="Markdown")
             return
-        await transfer_command(update, context, int(val))
+        # هدف اختیاری: آیدی عددی یا اسم بعد از مبلغ
+        target_ref = " ".join(parts_tr[2:]) if len(parts_tr) > 2 else None
+        await transfer_command(update, context, int(val), target_ref)
         return
     
     # ===== منو =====
@@ -4759,10 +4892,10 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text in ["جدول", "ج", "leaderboard", "top"]:
         with closing(db_connect()) as db:
             rows = db.execute(
-                "SELECT user_id, name, coins, level FROM users ORDER BY coins DESC LIMIT 10"
+                "SELECT user_id, name, coins, level, coins + COALESCE(bank_balance,0) as wealth FROM users ORDER BY wealth DESC LIMIT 10"
             ).fetchall()
             user_row = db.execute(
-                "SELECT COUNT(*) + 1 as rank FROM users WHERE coins > (SELECT coins FROM users WHERE user_id = ?)",
+                "SELECT COUNT(*) + 1 as rank FROM users WHERE coins + COALESCE(bank_balance,0) > (SELECT coins + COALESCE(bank_balance,0) FROM users WHERE user_id = ?)",
                 (user.id,)
             ).fetchone()
         
@@ -4774,7 +4907,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, row in enumerate(rows, 1):
             medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             title = get_title_by_level(row["level"])
-            msg += f"{medal} {title} {esc_md(row['name'])} — {row['coins']:,}\n"
+            msg += f"{medal} {title} {esc_md(row['name'])} — {row['wealth']:,}\n"
         
         if user_row and user_row["rank"]:
             msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
@@ -5153,6 +5286,33 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
+    # ===== 🎰 راهنمای بازی‌های فوری =====
+    if data == "instant_slot":
+        await query.edit_message_text(
+            "🎰 **اسلات خرستان**\n━━━━━━━━━━━━━━\n"
+            "سه تا حلقه می‌چرخه:\n"
+            "7️⃣7️⃣7️⃣ = جایزه **x20**! 💥\n"
+            "💎💎💎 = x10 | سه‌تایی دیگه = x6\n"
+            "دوتایی = x2\n\n"
+            f"💬 برای بازی بنویس: `اسلات 100`\n"
+            f"(حداقل {MIN_BET})",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازی‌ها", callback_data="games_list")]]),
+            parse_mode="Markdown")
+        return
+    
+    if data == "instant_double":
+        await query.edit_message_text(
+            "🎲 **دوبل یا هیچی**\n━━━━━━━━━━━━━━\n"
+            "یا دوبل می‌کنی یا هیچی!\n"
+            "🎉 بردی → پولت **دو برابر**\n"
+            "💀 باختی → شرطت می‌سوزه\n"
+            "🛡️ بیمه داشته باشی ۳۰٪ باختت برمی‌گرده\n\n"
+            f"💬 برای بازی بنویس: `دوبل 100`\n"
+            f"(حداقل {MIN_BET})",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازی‌ها", callback_data="games_list")]]),
+            parse_mode="Markdown")
+        return
+    
     # ===== لیست بازی‌ها =====
     if data == "games_list":
         await query.edit_message_text(
@@ -5463,10 +5623,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "leaderboard":
         with closing(db_connect()) as db:
             rows = db.execute(
-                "SELECT user_id, name, coins, level FROM users ORDER BY coins DESC LIMIT 10"
+                "SELECT user_id, name, coins, level, coins + COALESCE(bank_balance,0) as wealth FROM users ORDER BY wealth DESC LIMIT 10"
             ).fetchall()
             user_row = db.execute(
-                "SELECT COUNT(*) + 1 as rank FROM users WHERE coins > (SELECT coins FROM users WHERE user_id = ?)",
+                "SELECT COUNT(*) + 1 as rank FROM users WHERE coins + COALESCE(bank_balance,0) > (SELECT coins + COALESCE(bank_balance,0) FROM users WHERE user_id = ?)",
                 (user.id,)
             ).fetchone()
         
@@ -5478,7 +5638,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for i, row in enumerate(rows, 1):
             medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
             title = get_title_by_level(row["level"])
-            msg += f"{medal} {title} {esc_md(row['name'])} — {row['coins']:,}\n"
+            msg += f"{medal} {title} {esc_md(row['name'])} — {row['wealth']:,}\n"
         
         if user_row and user_row["rank"]:
             msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
@@ -5577,6 +5737,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     logger.error("❌ خطای هندل‌نشده:", exc_info=context.error)
 
+async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
+    """💾 بکاپ خودکار هر ساعت — فایل به پی‌وی اونر ارسال می‌شه"""
+    if not OWNER_ID:
+        return
+    try:
+        data = export_db_json()
+        if not data.get("users"):
+            return  # دیتابیس خالیه، بکاپ بی‌فایده‌ست
+        payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        import io
+        f = io.BytesIO(payload)
+        f.name = f"kharbot_auto_{time.strftime('%Y%m%d_%H%M')}.json"
+        await context.bot.send_document(
+            chat_id=OWNER_ID,
+            document=f,
+            caption=(f"💾 بکاپ خودکار ساعتی\n"
+                     f"👥 {len(data['users'])} بازیکن | 💬 {len(data.get('chats', []))} چت\n"
+                     f"🕐 {time.strftime('%Y-%m-%d %H:%M')}\n\n"
+                     f"📥 بازیابی: همین فایل رو با کپشن «بازیابی» بفرست."),
+            disable_notification=True  # 🔕 بی‌صدا که هر ساعت مزاحمت نشه
+        )
+        logger.info(f"💾 بکاپ خودکار ارسال شد ({len(data['users'])} کاربر)")
+    except Exception as e:
+        logger.error(f"❌ خطا در بکاپ خودکار: {e}")
+
 async def janitor_job(context: ContextTypes.DEFAULT_TYPE):
     """🧹 نظافتچی دوره‌ای: هر دقیقه اتاق‌های گیرکرده رو پاک می‌کنه و به گروه خبر می‌ده"""
     now = time.time()
@@ -5622,7 +5807,21 @@ def main():
         logger.error(f"❌ خطا در راه‌اندازی دیتابیس: {e}")
         return
     
-    app = Application.builder().token(BOT_TOKEN).build()
+    # 🚦 محدودکننده سرعت داخلی: قبل از اینکه تلگرام flood بگیره، خودمون ترمز می‌کنیم
+    builder = Application.builder().token(BOT_TOKEN)
+    try:
+        from telegram.ext import AIORateLimiter
+        builder = builder.rate_limiter(AIORateLimiter(
+            overall_max_rate=25,       # حداکثر ۲۵ پیام در ثانیه (سقف تلگرام ۳۰)
+            group_max_rate=18,         # حداکثر ~۱۸ پیام در دقیقه در هر گروه (سقف ۲۰)
+            group_time_period=60,
+            max_retries=3              # اگه flood خورد، خودش صبر و تکرار می‌کنه
+        ))
+        logger.info("🚦 Rate limiter فعال شد — ضد flood!")
+    except ImportError:
+        logger.warning("⚠️ AIORateLimiter نصب نیست! برای ضد flood نصب کن: "
+                       "pip install 'python-telegram-bot[rate-limiter]'")
+    app = builder.build()
     app.add_handler(MessageHandler(filters.TEXT, message_handler))
     app.add_handler(MessageHandler(filters.Dice.ALL, dice_roll_received))
     app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
@@ -5632,7 +5831,9 @@ def main():
     # 🧹 نظافتچی هر ۶۰ ثانیه (نیاز به python-telegram-bot[job-queue])
     if app.job_queue:
         app.job_queue.run_repeating(janitor_job, interval=60, first=60)
-        logger.info("🧹 نظافتچی دوره‌ای فعال شد")
+        # 💾 بکاپ خودکار هر ۱ ساعت (اولین بکاپ ۵ دقیقه بعد از استارت)
+        app.job_queue.run_repeating(auto_backup_job, interval=3600, first=300)
+        logger.info("🧹 نظافتچی دوره‌ای + 💾 بکاپ خودکار ساعتی فعال شد")
     else:
         logger.warning("⚠️ JobQueue نصب نیست — نظافت فقط موقع فعالیت کاربرا انجام می‌شه. "
                        "برای فعال‌سازی: pip install 'python-telegram-bot[job-queue]'")
