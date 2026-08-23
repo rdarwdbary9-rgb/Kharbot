@@ -65,6 +65,10 @@ def db_connect():
     try:
         db = sqlite3.connect(DB_FILE, timeout=20)
         db.row_factory = sqlite3.Row
+        # ⚡ WAL: خواندن و نوشتن همزمان بدون قفل + نوشتن خیلی سریع‌تر
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=NORMAL")
+        db.execute("PRAGMA cache_size=-8000")
         return db
     except sqlite3.OperationalError as e:
         logger.error(f"❌ خطای دیتابیس: {e}")
@@ -127,10 +131,17 @@ def init_db():
 # مدیریت کاربران
 # ============================================================
 
+# ⚡ کش: هر چت فقط هر ۱۰ دقیقه یه بار توی DB آپدیت می‌شه (نه با هر پیام!)
+_CHAT_TRACKED = {}
+
 def track_chat(chat):
     """ثبت گروه/پی‌وی برای پیام همگانی"""
     if not chat:
         return
+    now = time.time()
+    if now - _CHAT_TRACKED.get(chat.id, 0) < 600:
+        return  # همین ۱۰ دقیقه پیش ثبت شده
+    _CHAT_TRACKED[chat.id] = now
     try:
         with closing(db_connect()) as db:
             db.execute(
@@ -154,8 +165,15 @@ def set_setting(key, value):
         db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(value)))
         db.commit()
 
+# ⚡ کش: اسم هر کاربر فقط هر ۱۰ دقیقه یه بار آپدیت می‌شه (نه با هر پیام!)
+_USER_ENSURED = {}
+
 def ensure_user(user_id, name="کاربر"):
-    now = int(time.time())
+    now_t = time.time()
+    cached = _USER_ENSURED.get(user_id)
+    if cached and now_t - cached[0] < 600 and cached[1] == name:
+        return  # همین چند دقیقه پیش با همین اسم ثبت شده
+    now = int(now_t)
     with closing(db_connect()) as db:
         row = db.execute("SELECT user_id FROM users WHERE user_id = ?", (user_id,)).fetchone()
         if not row:
@@ -165,6 +183,11 @@ def ensure_user(user_id, name="کاربر"):
         else:
             db.execute("UPDATE users SET name = ? WHERE user_id = ?", (name[:100], user_id))
         db.commit()
+    _USER_ENSURED[user_id] = (now_t, name)
+    if len(_USER_ENSURED) > 5000:
+        cutoff = now_t - 600
+        for k in [k for k, v in _USER_ENSURED.items() if v[0] < cutoff][:2000]:
+            _USER_ENSURED.pop(k, None)
 
 def get_user(user_id):
     with closing(db_connect()) as db:
@@ -2711,7 +2734,194 @@ DICE_WAITING = {}
 
 EMOJI_OF_GAME = {"dice": "🎲", "darts": "🎯", "bowling": "🎳", "penalty": "⚽"}
 GAME_OF_EMOJI = {v: k for k, v in EMOJI_OF_GAME.items()}
-PENALTY_SHOTS = 3  # هر بازیکن ۳ ضربه
+PENALTY_SHOTS = 5  # ⚽ هر بازیکن ۵ ضربه — نوبتی! مساوی شد، ضربات طلایی
+
+# 🎙️ گزارشگر پنالتی
+PENALTY_COMMENTARY_GOAL = [
+    "🎙️ گگگگلللل!!! چه ضربه‌ای! دروازه‌بان فقط نگاه کرد! 🔥",
+    "🎙️ گل شد! توپ چسبید به گوشه دروازه، عالی بود! 🎯",
+    "🎙️ گللللل! دروازه‌بان شیرجه زد ولی توپ رد شد! 😱",
+    "🎙️ چه گلی! این ضربه رو باید قاب گرفت! 🖼️",
+    "🎙️ گل! خونسرد مثل یه خر حرفه‌ای! بی‌رحمانه زد! 🐴⚽",
+]
+PENALTY_COMMENTARY_MISS = [
+    "🎙️ ووووی! زد بیرون! توپ رفت هوا! 😵",
+    "🎙️ مهار شد! دروازه‌بان مثل پلنگ پرید! 🧤",
+    "🎙️ به تیرک خورد! چقدر بدشانس! 😩",
+    "🎙️ چیپ زد ولی دروازه‌بان جم نخورد! آبروریزی! 🙈",
+    "🎙️ خراب کرد! فشار پنالتی کمرش رو شکست! 😰",
+]
+PENALTY_COMMENTARY_TENSION = [
+    "🎙️ حساس‌ترین لحظه بازی...",
+    "🎙️ سکوت عجیبی طویله رو گرفته...",
+    "🎙️ تماشاگرا نفسشون رو حبس کردن...",
+    "🎙️ عجب بازی نفس‌گیری!",
+]
+
+def penalty_status_text(room, commentary=""):
+    """⚽ تابلوی امتیاز پنالتی نوبتی"""
+    gd = room.game_data
+    p1, p2 = room.players[0], room.players[1]
+    s1, s2 = gd["shots"].get(p1, []), gd["shots"].get(p2, [])
+    g1 = sum(1 for v in s1 if v >= 3)
+    g2 = sum(1 for v in s2 if v >= 3)
+    
+    def strip(shots, total):
+        out = ""
+        for v in shots:
+            out += "⚽" if v >= 3 else "❌"
+        out += "▫️" * max(0, total - len(shots))
+        return out
+    
+    total_shots = max(PENALTY_SHOTS, len(s1), len(s2))
+    shooter = room.players[gd["turn"]]
+    shot_no = len(gd["shots"].get(shooter, [])) + 1
+    
+    phase = "🥅 **ضربات طلایی — مرگ ناگهانی!**" if gd.get("sudden") else f"🥅 **سری پنالتی — ۵ ضربه‌ای**"
+    lines = [
+        f"⚽ {phase}",
+        "━━━━━━━━━━━━━━",
+        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}",
+        "",
+        f"{'👉' if shooter==p1 else '　'} {uname(p1)}: {strip(s1, total_shots)}  **{g1}**",
+        f"{'👉' if shooter==p2 else '　'} {uname(p2)}: {strip(s2, total_shots)}  **{g2}**",
+        "",
+    ]
+    if commentary:
+        lines.append(commentary)
+        lines.append("")
+    lines.append(f"🎯 نوبت: **{uname(shooter)}** — ضربه {shot_no}")
+    lines.append("👆 ایموجی ⚽ رو بفرست!")
+    return "\n".join(lines)
+
+def penalty_decided(room):
+    """بررسی پایان بازی — خروجی: برنده یا None
+    قانون ۵ ضربه‌ای: اگه اختلاف از ضربات باقی‌مونده بیشتر شد، زودتر تموم می‌شه.
+    بعد از ۵ ضربه مساوی → ضربات طلایی: هر دو زدن، هر کی گل کرد و اون یکی نکرد برنده‌ست."""
+    gd = room.game_data
+    p1, p2 = room.players[0], room.players[1]
+    s1, s2 = gd["shots"].get(p1, []), gd["shots"].get(p2, [])
+    g1 = sum(1 for v in s1 if v >= 3)
+    g2 = sum(1 for v in s2 if v >= 3)
+    n1, n2 = len(s1), len(s2)
+    
+    if not gd.get("sudden"):
+        # فاز عادی: برد زودهنگام ریاضی
+        left1, left2 = PENALTY_SHOTS - n1, PENALTY_SHOTS - n2
+        if g1 > g2 + left2: return p1
+        if g2 > g1 + left1: return p2
+        if n1 >= PENALTY_SHOTS and n2 >= PENALTY_SHOTS:
+            if g1 > g2: return p1
+            if g2 > g1: return p2
+            gd["sudden"] = True  # مساوی → ضربات طلایی!
+        return None
+    
+    # ضربات طلایی: هر دور (هر دو یه ضربه) مقایسه
+    if n1 == n2 and n1 > PENALTY_SHOTS:
+        if g1 > g2: return p1
+        if g2 > g1: return p2
+    return None
+
+async def penalty_shot_received(room, context, msg, uid, value):
+    """⚽ پردازش یک ضربه پنالتی — نوبتی!"""
+    gd = room.game_data
+    p1, p2 = room.players[0], room.players[1]
+    shooter = room.players[gd["turn"]]
+    
+    if uid != shooter:
+        try:
+            await msg.reply_text(f"⏳ نوبت تو نیست! الان {uname(shooter)} باید بزنه.")
+        except Exception:
+            pass
+        return
+    
+    shots = gd["shots"].setdefault(uid, [])
+    shots.append(value)
+    is_goal = value >= 3
+    
+    # 🎙️ گزارش این ضربه
+    comm = random.choice(PENALTY_COMMENTARY_GOAL if is_goal else PENALTY_COMMENTARY_MISS)
+    if gd.get("sudden"):
+        comm = random.choice(PENALTY_COMMENTARY_TENSION) + "\n" + comm
+    
+    # نوبت بعدی
+    gd["turn"] = 1 - gd["turn"]
+    
+    # کمی صبر تا انیمیشن توپ تلگرام تموم شه
+    await asyncio.sleep(3.5)
+    if room.finished:
+        return
+    
+    winner = penalty_decided(room)
+    if winner:
+        loser = p2 if winner == p1 else p1
+        s1, s2 = gd["shots"].get(p1, []), gd["shots"].get(p2, [])
+        g1 = sum(1 for v in s1 if v >= 3)
+        g2 = sum(1 for v in s2 if v >= 3)
+        add_coins(winner, room.pot())
+        record_win(winner)
+        record_loss(loser, room.bet)
+        sudden_txt = " (در ضربات طلایی! 💛)" if gd.get("sudden") else ""
+        await finish_game(room, context,
+            f"⚽ **پنالتی — پایان بازی!**\n━━━━━━━━━━━━━━\n"
+            f"{comm}\n\n"
+            f"📊 نتیجه نهایی:\n"
+            f"⚽ {uname(p1)}: **{g1}** گل\n"
+            f"⚽ {uname(p2)}: **{g2}** گل\n\n"
+            f"🎙️ تمووووم شد! **{uname(winner)}** قهرمان سری پنالتی شد{sudden_txt}!\n"
+            f"💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+        return
+    
+    # ادامه بازی — اگه الان وارد ضربات طلایی شدیم اعلام کن
+    if gd.get("sudden") and not gd.get("sudden_announced"):
+        gd["sudden_announced"] = True
+        comm += "\n\n🎙️ **باورم نمی‌شه! مساوی شد! می‌ریم ضربات طلایی — هر کی خطا کنه باخته!** 😱"
+    
+    await edit_room_msg(room, context, penalty_status_text(room, comm))
+    
+    # 🤖 نوبت خر باته؟
+    await penalty_bot_turn(room, context)
+
+async def penalty_bot_turn(room, context):
+    """🤖 خر بات ضربه‌ش رو می‌زنه"""
+    gd = room.game_data
+    while not room.finished and room.players[gd["turn"]] == BOT_ID:
+        await asyncio.sleep(2)
+        if room.finished or ACTIVE_ROOMS.get(room.room_id) is not room:
+            return
+        value = random.randint(1, 5)
+        p1, p2 = room.players[0], room.players[1]
+        shots = gd["shots"].setdefault(BOT_ID, [])
+        shots.append(value)
+        is_goal = value >= 3
+        comm = "🤖 خر بات پشت توپ ایستاد...\n" + random.choice(
+            PENALTY_COMMENTARY_GOAL if is_goal else PENALTY_COMMENTARY_MISS)
+        gd["turn"] = 1 - gd["turn"]
+        
+        winner = penalty_decided(room)
+        if winner:
+            loser = p2 if winner == p1 else p1
+            s1, s2 = gd["shots"].get(p1, []), gd["shots"].get(p2, [])
+            g1 = sum(1 for v in s1 if v >= 3)
+            g2 = sum(1 for v in s2 if v >= 3)
+            add_coins(winner, room.pot())
+            record_win(winner)
+            record_loss(loser, room.bet)
+            sudden_txt = " (در ضربات طلایی! 💛)" if gd.get("sudden") else ""
+            await finish_game(room, context,
+                f"⚽ **پنالتی — پایان بازی!**\n━━━━━━━━━━━━━━\n"
+                f"{comm}\n\n"
+                f"📊 نتیجه نهایی:\n"
+                f"⚽ {uname(p1)}: **{g1}** گل\n"
+                f"⚽ {uname(p2)}: **{g2}** گل\n\n"
+                f"🎙️ **{uname(winner)}** قهرمان شد{sudden_txt}!\n"
+                f"💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+            return
+        
+        if gd.get("sudden") and not gd.get("sudden_announced"):
+            gd["sudden_announced"] = True
+            comm += "\n\n🎙️ **مساوی! ضربات طلایی شروع شد!** 😱"
+        await edit_room_msg(room, context, penalty_status_text(room, comm))
 
 def emoji_status_text(room):
     gd = room.game_data
@@ -2719,12 +2929,7 @@ def emoji_status_text(room):
     lines = [f"{emo} **{GAME_NAMES[room.game_type]} — هر کی خودش می‌ندازه!**", "━━━━━━━━━━━━━━",
              f"💰 جایزه: {room.pot()} {CURRENCY_NAME}", ""]
     if room.game_type == "penalty":
-        for p in room.players:
-            shots = gd["shots"].get(p, [])
-            goals = sum(1 for v in shots if v >= 3)
-            done = "✅" if len(shots) >= PENALTY_SHOTS else "⏳"
-            lines.append(f"{done} {uname(p)}: {len(shots)}/{PENALTY_SHOTS} ضربه — ⚽ {goals} گل")
-        lines.append(f"\n👆 ایموجی ⚽ رو بفرست ({PENALTY_SHOTS} بار)!")
+        return penalty_status_text(room)
     else:
         for p in room.players:
             if p in gd["rolls"]:
@@ -2738,9 +2943,14 @@ def emoji_status_text(room):
 async def emoji_game_begin(room, context):
     """شروع بازی ایموجی: تاس/دارت/بولینگ (تک‌پرتاب) و پنالتی (۳ ضربه)"""
     if room.game_type == "penalty":
-        room.game_data = {"shots": {}, "deadline": time.time() + 120}
-        if BOT_ID in room.players:
-            room.game_data["shots"][BOT_ID] = [random.randint(1, 5) for _ in range(PENALTY_SHOTS)]
+        # ⚽ نوبتی: بازیکن اول شروع می‌کنه
+        room.game_data = {"shots": {}, "turn": 0, "deadline": time.time() + 300}
+        DICE_WAITING[room.chat_id] = room.room_id
+        await edit_room_msg(room, context,
+            penalty_status_text(room, "🎙️ سری پنالتی شروع شد! ۵ ضربه برای هر تیم — بریم ببینیم کی خونسردتره! 🐴"))
+        context.application.create_task(emoji_game_deadline_watch(room, context))
+        await penalty_bot_turn(room, context)  # اگه بات نفر اوله
+        return
     else:
         room.game_data = {"rolls": {}, "deadline": time.time() + 120}
         if BOT_ID in room.players:
@@ -2751,7 +2961,8 @@ async def emoji_game_begin(room, context):
 
 async def emoji_game_deadline_watch(room, context):
     try:
-        await asyncio.sleep(120)
+        # ⚽ پنالتی نوبتیه و طول می‌کشه → ۵ دقیقه؛ بقیه ۲ دقیقه
+        await asyncio.sleep(300 if room.game_type == "penalty" else 120)
         if ACTIVE_ROOMS.get(room.room_id) is not room or room.finished:
             return
         await emoji_game_finish(room, context)
@@ -2765,11 +2976,21 @@ async def emoji_game_finish(room, context):
     emo = EMOJI_OF_GAME[room.game_type]
     
     if room.game_type == "penalty":
-        scores = {}
-        for p in room.players:
-            shots = gd["shots"].get(p, [])
-            scores[p] = sum(1 for v in shots if v >= 3)  # ⚽ مقدار ۳ به بالا = گل
-        lines_detail = [f"{'🏆' if False else '▫️'}"]
+        # ⏰ تایم‌اوت پنالتی: هر کی سر نوبتش نیومد بازنده‌ست
+        p1, p2 = room.players[0], room.players[1]
+        slacker = room.players[gd.get("turn", 0)]
+        winner = p2 if slacker == p1 else p1
+        g1 = sum(1 for v in gd["shots"].get(p1, []) if v >= 3)
+        g2 = sum(1 for v in gd["shots"].get(p2, []) if v >= 3)
+        add_coins(winner, room.pot())
+        record_win(winner)
+        record_loss(slacker, room.bet)
+        await finish_game(room, context,
+            f"⚽ **پنالتی — پایان با تایم‌اوت!**\n━━━━━━━━━━━━━━\n"
+            f"🎙️ {uname(slacker)} سر نوبتش نیومد پشت توپ! داور سوت پایان رو زد! 😴\n\n"
+            f"📊 {uname(p1)}: {g1} گل | {uname(p2)}: {g2} گل\n"
+            f"🏆 برنده: **{uname(winner)}**\n💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+        return
     else:
         scores = {p: gd["rolls"].get(p, 0) for p in room.players}
     
@@ -2838,21 +3059,8 @@ async def dice_roll_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
     room.last_action = time.time()
     
     if room.game_type == "penalty":
-        shots = gd["shots"].setdefault(uid, [])
-        if len(shots) >= PENALTY_SHOTS:
-            try:
-                await msg.reply_text(f"😅 هر {PENALTY_SHOTS} تا ضربه‌ات رو زدی!")
-            except Exception:
-                pass
-            return
-        shots.append(msg.dice.value)
-        all_done = all(len(gd["shots"].get(p, [])) >= PENALTY_SHOTS for p in room.players)
-        if all_done:
-            await asyncio.sleep(3.5)
-            if not room.finished:
-                await emoji_game_finish(room, context)
-        else:
-            await edit_room_msg(room, context, emoji_status_text(room))
+        # ⚽ نوبتی با گزارشگر
+        await penalty_shot_received(room, context, msg, uid, msg.dice.value)
         return
     
     # تاس/دارت/بولینگ: تک پرتاب
@@ -4284,7 +4492,7 @@ HELP_SECTIONS = {
         "🆕 **بازی‌های جدید:**\n"
         "🎯 `دارت 100` — با ایموجی واقعی 🎯، بالاترین می‌بره (تا ۱۰ نفر)\n"
         "🎳 `بولینگ 100` — با ایموجی واقعی 🎳، استرایک = ۶ (تا ۱۰ نفر)\n"
-        "⚽ `پنالتی 100` — ۳ ضربه با ایموجی ⚽، گل بیشتر = برد (۲ نفره)\n"
+        "⚽ `پنالتی 100` — سری ۵ ضربه‌ای نوبتی با گزارشگر! مساوی = ضربات طلایی (۲ نفره)\n"
         "🔢 `حدس‌عدد 100` — عدد مخفی ۱-۱۰۰، نوبتی حدس بزن! (تا ۱۰ نفر)\n"
         "💣 `مین 100` — جعبه بمب‌دار رو باز نکن! حذفی (تا ۱۰ نفر)\n\n"
         "🎰 **بازی فوری تکی:**\n"
@@ -4451,6 +4659,9 @@ async def is_member_of_required(user_id, context):
 FJ_PROMPT_COOLDOWN = 90
 _FJ_LAST_PROMPT = {}
 
+# ⚡ چک‌های روزانه (مالیات/قسط وام) هر کاربر فقط هر ۱۰ دقیقه
+_DAILY_CHECKS_AT = {}
+
 # لیست دستورات متنی کامل ربات (برای تشخیص «آیا این پیام کار ربات است؟»)
 FJ_KNOWN_CMDS = {
     "راهنما", "help", "/help", "کمک", "منو", "menu", "خانه",
@@ -4554,9 +4765,15 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await force_join_gate(update, context, user.id):
         return
     
+    # ⚡ چک‌های روزانه (مالیات/قسط) فقط هر ۱۰ دقیقه یه بار — نه با هر پیام
+    _now_chk = time.time()
+    _do_daily_checks = _now_chk - _DAILY_CHECKS_AT.get(user.id, 0) >= 600
+    if _do_daily_checks:
+        _DAILY_CHECKS_AT[user.id] = _now_chk
+    
     # 💸 مالیات ثروت (روزی یه بار برای خیلی‌پولدارها)
     try:
-        tax = collect_wealth_tax(user.id)
+        tax = collect_wealth_tax(user.id) if _do_daily_checks else 0
         if tax > 0:
             await update.message.reply_text(
                 f"💸 **مالیات طویله!**\n"
@@ -4569,7 +4786,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # 💳 وصول خودکار قسط وام (روزی یک قسط — نداشت از ضامن! 😂)
     try:
-        events = loan_collect_due(user.id)
+        events = loan_collect_due(user.id) if _do_daily_checks else []
         for ev in events:
             if ev[0] == "guarantor" and ev[3] > 0:
                 _, due, from_self, from_g = ev
