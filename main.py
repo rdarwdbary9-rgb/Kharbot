@@ -2199,6 +2199,18 @@ async def edit_room_msg(room: GameRoom, context, text, keyboard=None):
                 logger.warning(f"⚠️ خطا در ویرایش پیام بازی: {e}")
             return
 
+async def send_commentary(room, context, text):
+    """🎙️ گزارشگر: پیام جدید به صورت ریپلای روی پیام اصلی بازی"""
+    try:
+        await context.bot.send_message(
+            chat_id=room.chat_id, text=text,
+            reply_to_message_id=room.message_id, parse_mode="Markdown")
+    except Exception:
+        try:
+            await context.bot.send_message(chat_id=room.chat_id, text=text, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"⚠️ خطا در ارسال گزارش: {e}")
+
 def result_keyboard():
     return InlineKeyboardMarkup([[InlineKeyboardButton("🎮 بازی جدید", callback_data="games_list"),
                                   InlineKeyboardButton("🏠 منو", callback_data="home")]])
@@ -2479,21 +2491,44 @@ def rps_keyboard(room):
         InlineKeyboardButton("✌️", callback_data=gcb(room.room_id, "rps_scissors"))
     ]])
 
+RPS_WINS_NEEDED = 2  # ✊ بهترین از ۳ — ۲ برد = قهرمانی
+
+RPS_COMM_WIN = [
+    "🎙️ چه حرکتی! حریف رو غافلگیر کرد! 🔥",
+    "🎙️ خوند دستشو! عالی بود! 🧠",
+    "🎙️ ضربه کاری! تماشاگرا هورا کشیدن! 📣",
+]
+RPS_COMM_DRAW = [
+    "🎙️ مساوی! ذهن‌هاشون یکی شد! 🤝",
+    "🎙️ هر دو یه چیز زدن! دوباره!",
+]
+
+def rps_status_text(room):
+    gd = room.game_data
+    p1, p2 = room.players[0], room.players[1]
+    w1, w2 = gd["wins"].get(p1, 0), gd["wins"].get(p2, 0)
+    lines = [
+        f"✊ **سنگ-کاغذ-قیچی — بهترین از ۳!**",
+        "━━━━━━━━━━━━━━",
+        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}",
+        "",
+        f"🔵 {uname(p1)}: {'🏅' * w1}{'▫️' * (RPS_WINS_NEEDED - w1)}  ({w1})",
+        f"🔴 {uname(p2)}: {'🏅' * w2}{'▫️' * (RPS_WINS_NEEDED - w2)}  ({w2})",
+        "",
+        f"🎲 دست {gd['round']} — 🤫 هر دو مخفیانه انتخاب کنید:",
+        f"⏳ انتخاب‌شده: {len([u for u in gd['choices'] if u != BOT_ID or True])}/2" if gd["choices"] else "⏳ انتخاب‌شده: 0/2",
+    ]
+    return "\n".join(lines)
+
 async def rps_begin(room, context):
-    room.game_data = {"choices": {}}
-    # 🤖 خر بات مخفیانه انتخابش رو می‌کنه
+    room.game_data = {"choices": {}, "wins": {}, "round": 1}
     if BOT_ID in room.players:
         room.game_data["choices"][BOT_ID] = random.choice(["rock", "paper", "scissors"])
     p1, p2 = room.players[0], room.players[1]
-    await edit_room_msg(
-        room, context,
-        f"✊ **سنگ-کاغذ-قیچی**\n━━━━━━━━━━━━━━\n"
-        f"⚔️ {uname(p1)} 🆚 {uname(p2)}\n"
-        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}\n\n"
-        f"🤫 هر دو بازیکن مخفیانه انتخاب کنید:\n"
-        f"⏳ انتخاب‌شده: 0/2",
-        rps_keyboard(room)
-    )
+    await edit_room_msg(room, context, rps_status_text(room), rps_keyboard(room))
+    await send_commentary(room, context,
+        f"🎙️ دوئل سنگ‌کاغذقیچی شروع شد! {uname(p1)} 🆚 {uname(p2)}\n"
+        f"🏆 هر کی ۲ دست ببره قهرمانه! انتخاب‌هاتون مخفیه... 🤫")
 
 async def rps_action(room, context, query, choice):
     uid = query.from_user.id
@@ -2504,41 +2539,56 @@ async def rps_action(room, context, query, choice):
     gd["choices"][uid] = choice
     await query.answer(f"انتخاب شد: {RPS_EMOJI[choice]} 🤫")
     
+    p1, p2 = room.players[0], room.players[1]
+    
     if len(gd["choices"]) < 2:
-        p1, p2 = room.players[0], room.players[1]
-        await edit_room_msg(
-            room, context,
-            f"✊ **سنگ-کاغذ-قیچی**\n━━━━━━━━━━━━━━\n"
-            f"⚔️ {uname(p1)} 🆚 {uname(p2)}\n"
-            f"💰 جایزه: {room.pot()} {CURRENCY_NAME}\n\n"
-            f"🤫 هر دو بازیکن مخفیانه انتخاب کنید:\n"
-            f"⏳ انتخاب‌شده: 1/2",
-            rps_keyboard(room)
-        )
+        await edit_room_msg(room, context, rps_status_text(room), rps_keyboard(room))
         return
     
-    p1, p2 = room.players[0], room.players[1]
     c1, c2 = gd["choices"][p1], gd["choices"][p2]
     beats = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
-    
-    header = (f"✊ **سنگ-کاغذ-قیچی — نتیجه**\n━━━━━━━━━━━━━━\n"
-              f"👤 {uname(p1)}: {RPS_EMOJI[c1]}\n"
-              f"👤 {uname(p2)}: {RPS_EMOJI[c2]}\n\n")
+    reveal = f"👤 {uname(p1)}: {RPS_EMOJI[c1]}  🆚  👤 {uname(p2)}: {RPS_EMOJI[c2]}"
     
     if c1 == c2:
-        # مساوی → دور جدید
+        # مساوی → همون دست دوباره
         gd["choices"] = {}
         if BOT_ID in room.players:
             gd["choices"][BOT_ID] = random.choice(["rock", "paper", "scissors"])
-        await edit_room_msg(room, context, header + "🤝 مساوی! دوباره انتخاب کنید:", rps_keyboard(room))
+        await send_commentary(room, context,
+            f"🎲 دست {gd['round']}:\n{reveal}\n{random.choice(RPS_COMM_DRAW)}\n\n🔁 همین دست دوباره بازی می‌شه!")
+        await edit_room_msg(room, context, rps_status_text(room), rps_keyboard(room))
         return
     
-    winner = p1 if beats[c1] == c2 else p2
-    loser = p2 if winner == p1 else p1
-    add_coins(winner, room.pot())
-    record_win(winner)
-    record_loss(loser, room.bet)
-    await finish_game(room, context, header + f"🏆 برنده: **{uname(winner)}**\n💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+    hand_winner = p1 if beats[c1] == c2 else p2
+    gd["wins"][hand_winner] = gd["wins"].get(hand_winner, 0) + 1
+    w = gd["wins"][hand_winner]
+    
+    # 🏆 برد زودهنگام: ۲ دست برد = تمام (نیازی به دست سوم نیست)
+    if w >= RPS_WINS_NEEDED:
+        loser = p2 if hand_winner == p1 else p1
+        add_coins(hand_winner, room.pot())
+        record_win(hand_winner)
+        record_loss(loser, room.bet)
+        w1, w2 = gd["wins"].get(p1, 0), gd["wins"].get(p2, 0)
+        await send_commentary(room, context,
+            f"🎲 دست {gd['round']}:\n{reveal}\n{random.choice(RPS_COMM_WIN)}")
+        await finish_game(room, context,
+            f"✊ **سنگ-کاغذ-قیچی — پایان!**\n━━━━━━━━━━━━━━\n"
+            f"📊 {uname(p1)} **{w1}** - **{w2}** {uname(p2)}\n\n"
+            f"🎙️ تمووووم شد! **{uname(hand_winner)}** با {w} برد قهرمان شد!\n"
+            f"💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+        return
+    
+    # دست بعدی
+    gd["round"] += 1
+    gd["choices"] = {}
+    if BOT_ID in room.players:
+        gd["choices"][BOT_ID] = random.choice(["rock", "paper", "scissors"])
+    await send_commentary(room, context,
+        f"🎲 دست {gd['round']-1}:\n{reveal}\n{random.choice(RPS_COMM_WIN)}\n\n"
+        f"🏅 این دست رو **{uname(hand_winner)}** برد! ({gd['wins'].get(p1,0)}-{gd['wins'].get(p2,0)})\n"
+        f"👉 دست {gd['round']} — دوباره انتخاب کنید!")
+    await edit_room_msg(room, context, rps_status_text(room), rps_keyboard(room))
 
 # ------------------------------------------------------------
 # ❌⭕ دوز (۲ نفره)
@@ -2877,7 +2927,11 @@ async def penalty_shot_received(room, context, msg, uid, value):
         gd["sudden_announced"] = True
         comm += "\n\n🎙️ **باورم نمی‌شه! مساوی شد! می‌ریم ضربات طلایی — هر کی خطا کنه باخته!** 😱"
     
-    await edit_room_msg(room, context, penalty_status_text(room, comm))
+    # 🎙️ گزارش با پیام ریپلای + اعلام نوبت بعدی
+    nxt = room.players[gd["turn"]]
+    comm = f"{uname(uid)} ضربه‌شو زد: {'⚽ گل!' if is_goal else '❌ خطا!'}\n{comm}\n\n👉 نوبت: **{uname(nxt)}**"
+    await send_commentary(room, context, comm)
+    await edit_room_msg(room, context, penalty_status_text(room))
     
     # 🤖 نوبت خر باته؟
     await penalty_bot_turn(room, context)
@@ -2921,48 +2975,202 @@ async def penalty_bot_turn(room, context):
         if gd.get("sudden") and not gd.get("sudden_announced"):
             gd["sudden_announced"] = True
             comm += "\n\n🎙️ **مساوی! ضربات طلایی شروع شد!** 😱"
-        await edit_room_msg(room, context, penalty_status_text(room, comm))
+        nxt = room.players[gd["turn"]]
+        comm = f"{comm}\n\n👉 نوبت: **{uname(nxt)}**"
+        await send_commentary(room, context, comm)
+        await edit_room_msg(room, context, penalty_status_text(room))
 
-def emoji_status_text(room):
+THROW_ROUNDS = 5  # 🎲🎯🎳 هر بازیکن ۵ پرتاب — نوبتی، مجموع بالاتر می‌بره
+
+# 🎙️ گزارشگر پرتاب‌ها
+THROW_COMM_HIGH = {
+    "dice":    ["🎙️ شیش!! تاس آتیش گرفت! 🔥", "🎙️ چه پرتابی! تاس رقصید و بالا نشست! 💃"],
+    "darts":   ["🎙️ وسط خال!! چشم بسته هم می‌زد انگار! 🎯🔥", "🎙️ بولزآی! تماشاگرا از جا پریدن! 😱"],
+    "bowling": ["🎙️ اسسسترایک!!! همه پین‌ها خوابیدن! 🎳💥", "🎙️ چه غرشی! سالن منفجر شد! 🔥"],
+}
+THROW_COMM_MID = {
+    "dice":    ["🎙️ پرتاب متوسط... می‌شد بهتر باشه!", "🎙️ بد نبود، ولی حریف خوشحال شد! 😏"],
+    "darts":   ["🎙️ نزدیک خال نشست... قابل قبوله!", "🎙️ دارت به تخته چسبید، نه عالی نه بد!"],
+    "bowling": ["🎙️ چند تا پین افتاد... نصفه‌کاره!", "🎙️ ضربه معمولی... جای پیشرفت داره!"],
+}
+THROW_COMM_LOW = {
+    "dice":    ["🎙️ آخ آخ! تاس بهش پشت کرد! 😩", "🎙️ یک؟! این دیگه بدشانسی محضه! 💀"],
+    "darts":   ["🎙️ پرت شد بغل تخته! کجا رو نشونه گرفتی؟! 🙈", "🎙️ افتضاح! دارت رفت تو دیوار! 😵"],
+    "bowling": ["🎙️ رفت تو کانال!! توپ آب خورد! 😭", "🎙️ عجب ضربه‌ای... به هیچی نخورد! 💨"],
+}
+
+def throw_commentary(gt, value):
+    if value >= 5: pool = THROW_COMM_HIGH[gt]
+    elif value >= 3: pool = THROW_COMM_MID[gt]
+    else: pool = THROW_COMM_LOW[gt]
+    return random.choice(pool)
+
+def throw_status_text(room):
+    """🎲🎯🎳 تابلوی امتیاز بازی‌های پرتابی نوبتی"""
     gd = room.game_data
     emo = EMOJI_OF_GAME[room.game_type]
-    lines = [f"{emo} **{GAME_NAMES[room.game_type]} — هر کی خودش می‌ندازه!**", "━━━━━━━━━━━━━━",
+    shooter = gd["order"][gd["turn"] % len(gd["order"])]
+    
+    phase = "💛 **راند طلایی — مرگ ناگهانی!**" if gd.get("sudden") else f"🏁 **{THROW_ROUNDS} پرتاب نوبتی — مجموع بالاتر می‌بره**"
+    lines = [f"{emo} **{GAME_NAMES[room.game_type]}**", phase, "━━━━━━━━━━━━━━",
              f"💰 جایزه: {room.pot()} {CURRENCY_NAME}", ""]
-    if room.game_type == "penalty":
-        return penalty_status_text(room)
+    
+    if gd.get("sudden"):
+        for p in gd["order"]:
+            sd = gd["sd_scores"].get(p, [])
+            vals = " ".join(str(v) for v in sd) or "—"
+            mark = "👉" if p == shooter else "　"
+            lines.append(f"{mark} {uname(p)}: مجموع {sum(gd['scores'].get(p, []))} | طلایی: {vals}")
     else:
-        for p in room.players:
-            if p in gd["rolls"]:
-                lines.append(f"✅ {uname(p)}: انداخت → **{gd['rolls'][p]}**")
-            else:
-                lines.append(f"⏳ {uname(p)}: منتظر پرتاب...")
-        lines.append(f"\n👆 ایموجی {emo} رو از پنل ایموجی‌ها بفرست!")
-    lines.append("⏰ ۲ دقیقه وقت دارید — نندازی، صفر حساب می‌شی!")
+        for p in gd["order"]:
+            sc = gd["scores"].get(p, [])
+            vals = " ".join(str(v) for v in sc) + " ▫️" * (THROW_ROUNDS - len(sc))
+            mark = "👉" if p == shooter else "　"
+            lines.append(f"{mark} {uname(p)}: {vals.strip()} = **{sum(sc)}**")
+    
+    lines.append("")
+    lines.append(f"🎯 نوبت: **{uname(shooter)}** — ایموجی {emo} رو بفرست!")
     return "\n".join(lines)
 
+def throw_decided(room):
+    """بررسی پایان — خروجی: برنده یا None. برد زودهنگام: وقتی بقیه ریاضیاً نمی‌رسن."""
+    gd = room.game_data
+    players = gd["order"]
+    totals = {p: sum(gd["scores"].get(p, [])) for p in players}
+    
+    if not gd.get("sudden"):
+        # برد زودهنگام: امتیاز فعلی یه نفر > حداکثر ممکن همه بقیه
+        for L in players:
+            others_max = max(
+                totals[p] + (THROW_ROUNDS - len(gd["scores"].get(p, []))) * 6
+                for p in players if p != L
+            )
+            if totals[L] > others_max:
+                return L
+        # همه پرتاب‌ها تموم؟
+        if all(len(gd["scores"].get(p, [])) >= THROW_ROUNDS for p in players):
+            best = max(totals.values())
+            leaders = [p for p in players if totals[p] == best]
+            if len(leaders) == 1:
+                return leaders[0]
+            # مساوی → راند طلایی بین صدرنشین‌ها
+            gd["sudden"] = True
+            gd["order"] = leaders
+            gd["turn"] = 0
+            gd["sd_scores"] = {}
+        return None
+    
+    # راند طلایی: وقتی همه یه پرتاب کردن مقایسه کن
+    sd = gd["sd_scores"]
+    counts = [len(sd.get(p, [])) for p in players]
+    if min(counts) == max(counts) and min(counts) > 0:
+        last = {p: sd[p][-1] for p in players}
+        best = max(last.values())
+        leaders = [p for p in players if last[p] == best]
+        if len(leaders) == 1:
+            return leaders[0]
+        # بازم مساوی → فقط صدرنشین‌ها ادامه می‌دن
+        gd["order"] = leaders
+        gd["turn"] = 0
+    return None
+
+async def throw_game_end(room, context, winner, note=""):
+    gd = room.game_data
+    emo = EMOJI_OF_GAME[room.game_type]
+    all_players = room.players
+    lines = []
+    for p in sorted(all_players, key=lambda x: -sum(gd["scores"].get(x, []))):
+        mark = "🏆" if p == winner else "▫️"
+        lines.append(f"{mark} {uname(p)}: مجموع **{sum(gd['scores'].get(p, []))}**")
+    add_coins(winner, room.pot())
+    record_win(winner)
+    for p in all_players:
+        if p != winner:
+            record_loss(p, room.bet)
+    sudden_txt = " (در راند طلایی! 💛)" if gd.get("sudden") else ""
+    await finish_game(room, context,
+        f"{emo} **{GAME_NAMES[room.game_type]} — پایان!**\n━━━━━━━━━━━━━━\n" +
+        "\n".join(lines) +
+        f"\n\n🎙️ تمووووم شد! **{uname(winner)}** قهرمان شد{sudden_txt}!{note}\n"
+        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+
+async def throw_received(room, context, uid, value, is_bot=False):
+    """پردازش یک پرتاب نوبتی (تاس/دارت/بولینگ)"""
+    gd = room.game_data
+    gt = room.game_type
+    
+    # ثبت پرتاب
+    if gd.get("sudden"):
+        gd["sd_scores"].setdefault(uid, []).append(value)
+    else:
+        gd["scores"].setdefault(uid, []).append(value)
+    gd["turn"] = (gd["turn"] + 1) % len(gd["order"])
+    
+    # کمی صبر تا انیمیشن ایموجی تلگرام تموم شه
+    await asyncio.sleep(3.5)
+    if room.finished or ACTIVE_ROOMS.get(room.room_id) is not room:
+        return
+    
+    was_sudden = gd.get("sudden", False)
+    winner = throw_decided(room)
+    
+    # 🎙️ گزارش این پرتاب (ریپلای روی پیام اصلی)
+    who = "🤖 خر بات" if is_bot else uname(uid)
+    comm = f"{who} انداخت: **{value}**\n{throw_commentary(gt, value)}"
+    
+    if winner:
+        await send_commentary(room, context, comm)
+        await throw_game_end(room, context, winner)
+        return
+    
+    if gd.get("sudden") and not was_sudden:
+        comm += "\n\n🎙️ **مساوی شد! می‌ریم راند طلایی — هر پرتاب می‌تونه آخرین باشه!** 😱"
+    
+    nxt = gd["order"][gd["turn"] % len(gd["order"])]
+    comm += f"\n\n👉 نوبت: **{uname(nxt)}**"
+    await send_commentary(room, context, comm)
+    await edit_room_msg(room, context, throw_status_text(room))
+    await throw_bot_turn(room, context)
+
+async def throw_bot_turn(room, context):
+    """🤖 نوبت خر بات توی بازی‌های پرتابی"""
+    gd = room.game_data
+    while (not room.finished and ACTIVE_ROOMS.get(room.room_id) is room
+           and gd["order"][gd["turn"] % len(gd["order"])] == BOT_ID):
+        await asyncio.sleep(2)
+        if room.finished or ACTIVE_ROOMS.get(room.room_id) is not room:
+            return
+        await throw_received(room, context, BOT_ID, random.randint(1, 6), is_bot=True)
+        return  # throw_received خودش زنجیره رو ادامه می‌ده
+
 async def emoji_game_begin(room, context):
-    """شروع بازی ایموجی: تاس/دارت/بولینگ (تک‌پرتاب) و پنالتی (۳ ضربه)"""
+    """شروع بازی‌های ایموجی — همه نوبتی با گزارشگر!"""
     if room.game_type == "penalty":
-        # ⚽ نوبتی: بازیکن اول شروع می‌کنه
         room.game_data = {"shots": {}, "turn": 0, "deadline": time.time() + 300}
         DICE_WAITING[room.chat_id] = room.room_id
-        await edit_room_msg(room, context,
-            penalty_status_text(room, "🎙️ سری پنالتی شروع شد! ۵ ضربه برای هر تیم — بریم ببینیم کی خونسردتره! 🐴"))
+        await edit_room_msg(room, context, penalty_status_text(room))
+        await send_commentary(room, context,
+            "🎙️ سری پنالتی شروع شد! ۵ ضربه برای هر تیم — بریم ببینیم کی خونسردتره! 🐴\n"
+            f"👉 اولین ضربه: **{uname(room.players[0])}**")
         context.application.create_task(emoji_game_deadline_watch(room, context))
-        await penalty_bot_turn(room, context)  # اگه بات نفر اوله
+        await penalty_bot_turn(room, context)
         return
-    else:
-        room.game_data = {"rolls": {}, "deadline": time.time() + 120}
-        if BOT_ID in room.players:
-            room.game_data["rolls"][BOT_ID] = random.randint(1, 6)
+    
+    # 🎲🎯🎳 نوبتی ۵ راندی
+    room.game_data = {"scores": {}, "order": room.players[:], "turn": 0, "deadline": time.time() + 300}
     DICE_WAITING[room.chat_id] = room.room_id
-    await edit_room_msg(room, context, emoji_status_text(room))
+    emo = EMOJI_OF_GAME[room.game_type]
+    await edit_room_msg(room, context, throw_status_text(room))
+    await send_commentary(room, context,
+        f"🎙️ مسابقه {GAME_NAMES[room.game_type]} شروع شد! {THROW_ROUNDS} پرتاب نوبتی — مجموع بالاتر می‌بره!\n"
+        f"👉 اولین پرتاب: **{uname(room.players[0])}** — ایموجی {emo} رو بفرست!")
     context.application.create_task(emoji_game_deadline_watch(room, context))
+    await throw_bot_turn(room, context)
 
 async def emoji_game_deadline_watch(room, context):
     try:
-        # ⚽ پنالتی نوبتیه و طول می‌کشه → ۵ دقیقه؛ بقیه ۲ دقیقه
-        await asyncio.sleep(300 if room.game_type == "penalty" else 120)
+        # همه بازی‌های ایموجی الان نوبتی‌ان → ۵ دقیقه
+        await asyncio.sleep(300)
         if ACTIVE_ROOMS.get(room.room_id) is not room or room.finished:
             return
         await emoji_game_finish(room, context)
@@ -2970,13 +3178,13 @@ async def emoji_game_deadline_watch(room, context):
         logger.warning(f"⚠️ خطا در تایمر بازی ایموجی: {e}")
 
 async def emoji_game_finish(room, context):
+    """⏰ فقط برای تایم‌اوت — هر کی سر نوبتش نیومد بازنده‌ست"""
     gd = room.game_data
     if DICE_WAITING.get(room.chat_id) == room.room_id:
         DICE_WAITING.pop(room.chat_id, None)
     emo = EMOJI_OF_GAME[room.game_type]
     
     if room.game_type == "penalty":
-        # ⏰ تایم‌اوت پنالتی: هر کی سر نوبتش نیومد بازنده‌ست
         p1, p2 = room.players[0], room.players[1]
         slacker = room.players[gd.get("turn", 0)]
         winner = p2 if slacker == p1 else p1
@@ -2991,11 +3199,10 @@ async def emoji_game_finish(room, context):
             f"📊 {uname(p1)}: {g1} گل | {uname(p2)}: {g2} گل\n"
             f"🏆 برنده: **{uname(winner)}**\n💰 جایزه: {room.pot()} {CURRENCY_NAME}")
         return
-    else:
-        scores = {p: gd["rolls"].get(p, 0) for p in room.players}
     
-    best = max(scores.values())
-    if best == 0:
+    # بازی‌های پرتابی
+    total_throws = sum(len(v) for v in gd.get("scores", {}).values())
+    if total_throws == 0:
         for p in room.players:
             add_coins(p, room.bet)
         await finish_game(room, context,
@@ -3003,15 +3210,11 @@ async def emoji_game_finish(room, context):
             "😴 هیچ‌کس بازی نکرد! شرط همه برگشت داده شد.")
         return
     
-    winners = [p for p, v in scores.items() if v == best]
-    lines = []
-    for p, v in sorted(scores.items(), key=lambda x: -x[1]):
-        mark = "🏆" if p in winners else "▫️"
-        if room.game_type == "penalty":
-            lines.append(f"{mark} {uname(p)}: ⚽ **{v}** گل از {PENALTY_SHOTS} ضربه")
-        else:
-            val = f"**{v}**" if v > 0 else "💤 ننداخت (صفر)"
-            lines.append(f"{mark} {uname(p)}: {val}")
+    slacker = gd["order"][gd["turn"] % len(gd["order"])]
+    remaining = [p for p in room.players if p != slacker]
+    totals = {p: sum(gd["scores"].get(p, [])) for p in remaining}
+    best = max(totals.values()) if totals else 0
+    winners = [p for p in remaining if totals[p] == best] or remaining[:1]
     
     share = room.pot() // len(winners)
     for w in winners:
@@ -3022,10 +3225,10 @@ async def emoji_game_finish(room, context):
             record_loss(p, room.bet)
     
     win_names = "، ".join(uname(w) for w in winners)
-    result_note = "🤝 مساوی — تقسیم جایزه!\n" if len(winners) > 1 else ""
     await finish_game(room, context,
-        f"{emo} **{GAME_NAMES[room.game_type]} — نتیجه**\n━━━━━━━━━━━━━━\n" + "\n".join(lines) +
-        f"\n\n{result_note}🏆 برنده: **{win_names}**\n💰 جایزه هر نفر: {share} {CURRENCY_NAME}")
+        f"{emo} **{GAME_NAMES[room.game_type]} — پایان با تایم‌اوت!**\n━━━━━━━━━━━━━━\n"
+        f"🎙️ {uname(slacker)} سر نوبتش نیومد! داور حذفش کرد! 😴\n\n"
+        f"🏆 برنده: **{win_names}**\n💰 جایزه هر نفر: {share} {CURRENCY_NAME}")
 
 async def dice_roll_received(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """🎲🎯🎳⚽ وقتی کسی ایموجی بازی می‌فرسته — عدد واقعی از تلگرام خونده می‌شه"""
@@ -3063,22 +3266,16 @@ async def dice_roll_received(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await penalty_shot_received(room, context, msg, uid, msg.dice.value)
         return
     
-    # تاس/دارت/بولینگ: تک پرتاب
-    if uid in gd["rolls"]:
-        try:
-            await msg.reply_text("😅 قبلاً انداختی! همون اولی حسابه.")
-        except Exception:
-            pass
+    # 🎲🎯🎳 نوبتی: فقط کسی که نوبتشه
+    shooter = gd["order"][gd["turn"] % len(gd["order"])]
+    if uid != shooter:
+        if uid in gd["order"]:
+            try:
+                await msg.reply_text(f"⏳ نوبت تو نیست! الان {uname(shooter)} باید بندازه.")
+            except Exception:
+                pass
         return
-    
-    gd["rolls"][uid] = msg.dice.value
-    
-    if len(gd["rolls"]) == len(room.players):
-        await asyncio.sleep(3.5)
-        if not room.finished:
-            await emoji_game_finish(room, context)
-    else:
-        await edit_room_msg(room, context, emoji_status_text(room))
+    await throw_received(room, context, uid, msg.dice.value)
 
 # ------------------------------------------------------------
 # 🔢 حدس عدد (۲ تا ۱۰ نفره) — عدد مخفی ۱ تا ۱۰۰
@@ -4481,17 +4678,17 @@ HELP_SECTIONS = {
         "🎮 **بازی‌های گروهی** — اسم بازی + شرط:\n"
         "━━━━━━━━━━━━━━\n"
         "💥 `انفجار 100` — ضریب بالا می‌ره، قبل انفجار برداشت کن! (تا ۱۰ نفر)\n"
-        "🎲 `تاس 100` — هر کی **خودش ایموجی 🎲 می‌فرسته**، بالاترین عدد می‌بره! (تا ۱۰ نفر)\n"
+        "🎲 `تاس 100` — ۵ پرتاب نوبتی با گزارشگر! مجموع بالاتر می‌بره (تا ۱۰ نفر)\n"
         "🔫 `رولت 100` — نوبتی انتخاب کن به کی شلیک بشه! آخرین بازمانده می‌بره (تا ۱۰ نفر)\n"
         "🔼🔽 `حدس 100` — حدس مجموع دو تاس، دقیقاً ۷ = x5 (تا ۱۰ نفر)\n"
         "🎰 `پوکر 100` — بهترین دست ۵ کارتی می‌بره (تا ۶ نفر)\n"
         "🃏 `بلک‌جک 100` — نزدیک‌ترین به ۲۱ بدون سوختن (تا ۶ نفر)\n"
         "❌⭕ `دوز 100` — سه‌تا ردیف کن! (۲ نفره)\n"
-        "✊ `سنگ 100` — سنگ‌کاغذقیچی (۲ نفره)\n"
+        "✊ `سنگ 100` — سنگ‌کاغذقیچی بهترین از ۳ دست! (۲ نفره)\n"
         "🪙 `شیرخط 100` — شانس خالص! (۲ نفره)\n\n"
         "🆕 **بازی‌های جدید:**\n"
-        "🎯 `دارت 100` — با ایموجی واقعی 🎯، بالاترین می‌بره (تا ۱۰ نفر)\n"
-        "🎳 `بولینگ 100` — با ایموجی واقعی 🎳، استرایک = ۶ (تا ۱۰ نفر)\n"
+        "🎯 `دارت 100` — ۵ پرتاب نوبتی با گزارشگر! مجموع بالاتر می‌بره (تا ۱۰ نفر)\n"
+        "🎳 `بولینگ 100` — ۵ پرتاب نوبتی با گزارشگر! استرایک = ۶ (تا ۱۰ نفر)\n"
         "⚽ `پنالتی 100` — سری ۵ ضربه‌ای نوبتی با گزارشگر! مساوی = ضربات طلایی (۲ نفره)\n"
         "🔢 `حدس‌عدد 100` — عدد مخفی ۱-۱۰۰، نوبتی حدس بزن! (تا ۱۰ نفر)\n"
         "💣 `مین 100` — جعبه بمب‌دار رو باز نکن! حذفی (تا ۱۰ نفر)\n\n"
