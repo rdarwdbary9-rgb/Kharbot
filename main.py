@@ -114,6 +114,10 @@ def init_db():
                 key TEXT PRIMARY KEY,
                 value TEXT DEFAULT '')""")
             
+            # 🏆 لیگ هفتگی — سکه‌های کسب‌شده این هفته
+            db.execute("""CREATE TABLE IF NOT EXISTS league (
+                user_id INTEGER PRIMARY KEY,
+                earned INTEGER DEFAULT 0)""")
             db.commit()
             # مهاجرت: ستون‌های جدید (اگر دیتابیس قدیمی باشد)
             existing = {r[1] for r in db.execute("PRAGMA table_info(users)").fetchall()}
@@ -203,11 +207,16 @@ def uname(user_id):
     u = get_user(user_id)
     return esc_md(u["name"]) if u else "ناشناس"
 
-def add_coins(user_id, amount):
+def add_coins(user_id, amount, league=True):
+    """league=False برای انتقال/کادو — که تقلب لیگ نشه"""
     if user_id == BOT_ID: return True  # خر بات پول لازم نداره
     if amount <= 0: return False
     with closing(db_connect()) as db:
         db.execute("UPDATE users SET coins = coins + ? WHERE user_id = ?", (amount, user_id))
+        if league:
+            db.execute("""INSERT INTO league (user_id, earned) VALUES (?, ?)
+                          ON CONFLICT(user_id) DO UPDATE SET earned = earned + ?""",
+                      (user_id, amount, amount))
         db.commit()
     update_level(user_id)
     return True
@@ -380,13 +389,13 @@ async def daily_reward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.commit()
     
     await update.message.reply_text(
-        f"🎁 **جایزه روزانه!**\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"👤 {esc_md(user.first_name)} عزیز\n"
-        f"💰 جایزه: **{reward}** {CURRENCY_NAME}"
+        f"🎁 **جایزه روزانه رسید!**\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"👤  {esc_md(user.first_name)} عزیز\n"
+        f"💰  جایزه امروز: **{reward:,}** {CURRENCY_NAME}"
         f"{bonus}"
         f"{baby_line_txt}\n"
-        f"\n📅 فردا دوباره بیا! 🐴",
+        f"\n📅 فردا هم یادت نره! 🐴✨",
         parse_mode="Markdown"
     )
 
@@ -470,6 +479,14 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reward += extra
         bonus = f"\n🌟 **عر طلایی!** پژواکش کل طویله رو لرزوند! +{extra} {CURRENCY_NAME}"
     
+    # 💨 نئشگی تریاک: پاداش عر ×۲
+    try:
+        if get_opium_boost(user.id):
+            reward *= 2
+            bonus += "\n😵‍💫 نئشگی: پاداش **×۲** شد!"
+    except Exception:
+        pass
+    
     if reward > 0:
         add_coins(user.id, reward)
     
@@ -482,16 +499,13 @@ async def donkey_sound(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rank = get_sound_rank(sound_count)
     
     await update.message.reply_text(
-        f"🔊 **صدای خر!**\n"
-        f"━━━━━━━━━━━━━━\n"
-        f"🎤 {sound_info['sound']}\n"
-        f"📝 {sound_info['desc']}\n"
-        f"\n👤 {esc_md(user.first_name)} عر کشید!\n"
-        f"💰 پوینت: **+{reward}** {CURRENCY_NAME}"
-        f"{bonus}\n"
-        f"\n🏅 رتبه عرعر: {rank}\n"
-        f"🔢 تعداد کل عرها: {sound_count}\n"
-        f"💡 «صداها» رو بزن تا همه صداها رو ببینی!",
+        f"🔊 **{sound_info['sound']}**\n"
+        f"━━━━━━━━━━━━━━━━\n"
+        f"📝  {sound_info['desc']}\n"
+        f"👤  {esc_md(user.first_name)} عر کشید!\n\n"
+        f"💰  پاداش: **+{reward:,}** {CURRENCY_NAME}"
+        f"{bonus}\n\n"
+        f"🏅  {rank}  •  🔢 عر شماره {sound_count}",
         parse_mode="Markdown"
     )
 
@@ -566,12 +580,22 @@ async def work_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     wage = random.randint(job["min"], job["max"])
+    boost_note = ""
+    try:
+        if get_opium_boost(user.id):
+            wage *= 2
+            boost_note = "\n😵‍💫 نئشگی: دستمزد **×۲** شد!"
+        elif is_addict_hungover(user.id):
+            wage //= 2
+            boost_note = "\n🥶 خماری: دستمزدت **نصف** شد! برو ترک کن..."
+    except Exception:
+        pass
     add_coins(user.id, wage)
     await update.message.reply_text(
-        f"💼 **کار: {job['name']}**\n━━━━━━━━━━━━━━\n"
-        f"👤 {esc_md(user.first_name)} یه ساعت جون کند...\n"
-        f"💰 دستمزد: **+{wage}** {CURRENCY_NAME}\n\n"
-        f"⏰ نیم ساعت دیگه دوباره می‌تونی کار کنی!",
+        f"💼 **{job['name']}**\n━━━━━━━━━━━━━━━━\n"
+        f"👤  {esc_md(user.first_name)} حسابی جون کند... 😮‍💨\n"
+        f"💰  دستمزد: **+{wage:,}** {CURRENCY_NAME}{boost_note}\n\n"
+        f"⏰ نیم ساعت دیگه دوباره بیا سر کار!",
         parse_mode="Markdown"
     )
 
@@ -849,7 +873,7 @@ async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE, a
     
     tax = int(amount * TRANSFER_TAX)
     received = amount - tax
-    add_coins(target_id, received)
+    add_coins(target_id, received, league=False)
     await update.message.reply_text(
         f"💸 **انتقال موفق!**\n━━━━━━━━━━━━━━\n"
         f"👤 {esc_md(user.first_name)} ⬅️ {esc_md(target_name)}\n"
@@ -864,8 +888,8 @@ async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE, a
 # 🏦 بانک خرستان — سپرده با سود روزانه + امنیت در برابر دزدی
 # ============================================================
 
-BANK_INTEREST = 0.30        # ۳۰٪ سود روزانه
-BANK_INTEREST_CAP = 20000   # 🧢 سقف سود روزانه — رو سپرده‌های نجومی ترمز
+BANK_INTEREST = 0.20        # ۲۰٪ سود روزانه
+BANK_INTEREST_CAP = 10**12  # بدون سقف عملی
 BANK_MIN_DEPOSIT = 500
 BANK_MAX_BALANCE = 500000   # سقف حساب (که اقتصاد منفجر نشه)
 
@@ -880,10 +904,12 @@ def bank_pending_interest(user_id):
     if balance <= 0:
         return 0, False
     if not last:
+        # 🛟 تایمر گم شده (مثلاً بعد از ری‌استارت سرور بدون بازیابی) —
+        # به نفع کاربر: سود همین الان آماده برداشته!
+        last = now - 86400
         with closing(db_connect()) as db:
-            db.execute("UPDATE users SET bank_last = ? WHERE user_id = ?", (now, user_id))
+            db.execute("UPDATE users SET bank_last = ? WHERE user_id = ?", (last, user_id))
             db.commit()
-        return 0, False
     if now - last < 86400:
         return 0, False
     # ⚠️ فقط سود یک روز — دیر بیای، سود روزهای قبل سوخته!
@@ -944,7 +970,7 @@ def bank_text(user_id):
         f"🛡️ پول توی بانک از **دزدی در امانه!**\n"
         f"📊 سقف حساب: {BANK_MAX_BALANCE:,}\n\n"
         f"📋 **دستورات:**\n"
-        f"`واریز 1000` — پول بذار توی بانک\n"
+        f"`واریز 1000` یا `واریز همه` — پول بذار توی بانک\n"
         f"`برداشت 1000` — پول بردار (یا `برداشت همه`)\n"
         f"`سود` — برداشت سود روزانه 💹\n"
         f"`وام 5000` (با ریپلی روی ضامن) — وام تا {LOAN_MAX:,} 💳\n"
@@ -1310,6 +1336,320 @@ def insurance_panel_text(user_id):
 
 
 # ============================================================
+# 🚔 سیستم بازداشت — قفل کامل ربات برای مدت مشخص
+# ============================================================
+
+def get_jail_until(user_id):
+    return int(get_setting(f"jail_{user_id}", "0") or 0)
+
+def jail_user(user_id, seconds):
+    set_setting(f"jail_{user_id}", str(int(time.time()) + seconds))
+
+def is_jailed(user_id):
+    """خروجی: ثانیه‌های باقی‌مانده بازداشت (۰ = آزاد)"""
+    until = get_jail_until(user_id)
+    now = int(time.time())
+    return max(0, until - now)
+
+# ============================================================
+# 🏆 لیگ هفتگی خرستان — شنبه تا جمعه (وقت ایران)
+# ============================================================
+
+IRAN_UTC_OFFSET = 3.5 * 3600  # ایران UTC+3:30
+LEAGUE_PRIZES = [200000, 100000, 50000]  # 🥇🥈🥉
+
+def league_week_end_ts():
+    """تایم‌استمپ جمعه ۲۳:۵۹:۵۹ همین هفته به وقت ایران"""
+    now_ir = time.time() + IRAN_UTC_OFFSET
+    tm = time.gmtime(now_ir)
+    # weekday: دوشنبه=0 ... جمعه=4، شنبه=5، یکشنبه=6
+    # روزهای مونده تا جمعه:
+    days_to_friday = (4 - tm.tm_wday) % 7
+    # امروز جمعه‌ست؟ همین امروز آخر هفته‌ست
+    midnight_ir = now_ir - (tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec)
+    end_ir = midnight_ir + days_to_friday * 86400 + 86399  # جمعه ۲۳:۵۹:۵۹
+    return int(end_ir - IRAN_UTC_OFFSET)  # برگردون به UTC
+
+def league_get_end():
+    """تاریخ پایان هفته جاری — نبود، بساز و ذخیره کن"""
+    end = int(get_setting("league_end", "0") or 0)
+    if not end:
+        end = league_week_end_ts()
+        set_setting("league_end", str(end))
+    return end
+
+def league_top(limit=10):
+    with closing(db_connect()) as db:
+        return db.execute(
+            """SELECT l.user_id, l.earned, u.name, u.level FROM league l
+               JOIN users u ON u.user_id = l.user_id
+               WHERE l.earned > 0 ORDER BY l.earned DESC LIMIT ?""", (limit,)).fetchall()
+
+def league_text(user_id=None):
+    end = league_get_end()
+    remaining = max(0, end - int(time.time()))
+    d, h = remaining // 86400, (remaining % 86400) // 3600
+    rows = league_top(10)
+    lines = ["⚡ **لیگ هفتگی خرستان**", "━━━━━━━━━━━━━━",
+             f"⏳ پایان هفته: {d} روز و {h} ساعت دیگه (جمعه‌شب)",
+             f"🎁 جوایز: 🥇 {LEAGUE_PRIZES[0]:,} | 🥈 {LEAGUE_PRIZES[1]:,} | 🥉 {LEAGUE_PRIZES[2]:,}", ""]
+    if not rows:
+        lines.append("هنوز کسی امتیازی نگرفته! برو بازی کن، کار کن، عر بزن! 🐴")
+    else:
+        for i, r in enumerate(rows, 1):
+            medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
+            lines.append(f"{medal} {esc_md(r['name'])} — **{r['earned']:,}** کسب این هفته")
+    if user_id:
+        with closing(db_connect()) as db:
+            me = db.execute("SELECT earned FROM league WHERE user_id = ?", (user_id,)).fetchone()
+            if me and me["earned"] > 0:
+                rank = db.execute("SELECT COUNT(*)+1 as r FROM league WHERE earned > ?", (me["earned"],)).fetchone()["r"]
+                lines.append(f"\n👤 تو: رتبه #{rank} با {me['earned']:,}")
+    lines.append("\n💡 هر سکه‌ای که از بازی/کار/سود کسب کنی، امتیاز لیگه!")
+    return "\n".join(lines)
+
+def leaderboard_choice_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🏆 جدول کلی", callback_data="lb_total"),
+        InlineKeyboardButton("⚡ لیگ هفتگی", callback_data="lb_week")
+    ]])
+
+def total_leaderboard_text(user_id):
+    """🏆 جدول کلی ثروتمندان (جیب + بانک)"""
+    with closing(db_connect()) as db:
+        rows = db.execute(
+            "SELECT user_id, name, coins, level, coins + COALESCE(bank_balance,0) as wealth FROM users ORDER BY wealth DESC LIMIT 10"
+        ).fetchall()
+        user_row = db.execute(
+            "SELECT COUNT(*) + 1 as rank FROM users WHERE coins + COALESCE(bank_balance,0) > (SELECT coins + COALESCE(bank_balance,0) FROM users WHERE user_id = ?)",
+            (user_id,)).fetchone()
+    if not rows:
+        return "❌ هنوز کسی ثبت نشده!"
+    msg = "🏆 **جدول ثروتمندان طویله**\n━━━━━━━━━━━━━━━━\n"
+    for i, row in enumerate(rows, 1):
+        medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
+        title = get_title_by_level(row["level"])
+        msg += f"{medal} {title} {esc_md(row['name'])} — {row['wealth']:,}\n"
+    if user_row and user_row["rank"]:
+        msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
+    return msg
+
+async def league_settle(context):
+    """🏁 پایان هفته: پرداخت جوایز + اعلام در همه گروه‌ها + ریست"""
+    rows = league_top(3)
+    end = league_get_end()
+    
+    # پرداخت جوایز
+    winner_lines = []
+    for i, r in enumerate(rows):
+        prize = LEAGUE_PRIZES[i]
+        add_coins(r["user_id"], prize, league=False)  # جایزه توی لیگ بعدی حساب نشه!
+        medal = ["🥇", "🥈", "🥉"][i]
+        winner_lines.append(f"{medal} **{esc_md(r['name'])}** — {r['earned']:,} امتیاز → جایزه: **{prize:,}** {CURRENCY_NAME}")
+    
+    # ریست لیگ + هفته جدید
+    with closing(db_connect()) as db:
+        db.execute("DELETE FROM league")
+        db.commit()
+    new_end = league_week_end_ts()
+    if new_end <= int(time.time()):
+        new_end += 7 * 86400
+    set_setting("league_end", str(new_end))
+    
+    if not rows:
+        logger.info("🏆 هفته لیگ بدون شرکت‌کننده تموم شد")
+        return
+    
+    # 📢 اعلام در همه گروه‌ها
+    msg = ("🏆🎉 **پایان هفته لیگ خرستان!** 🎉🏆\n━━━━━━━━━━━━━━━━\n"
+           "قهرمانان این هفته:\n\n" + "\n".join(winner_lines) +
+           "\n\n⚡ هفته جدید از همین الان شروع شد!\nبجنگید برای قهرمانی! 🐴🔥")
+    try:
+        with closing(db_connect()) as db:
+            chats = db.execute("SELECT chat_id FROM chats WHERE chat_type IN ('group','supergroup')").fetchall()
+        for ch in chats:
+            try:
+                await context.bot.send_message(chat_id=ch["chat_id"], text=msg, parse_mode="Markdown")
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+    except Exception as e:
+        logger.error(f"❌ خطا در اعلام لیگ: {e}")
+    logger.info(f"🏆 لیگ هفتگی بسته شد — {len(rows)} برنده")
+
+# ============================================================
+# 🏦🦹 دزدی از بانک خرستان — پرریسک، پرسود!
+# ============================================================
+
+BANK_HEIST_CHANCE = 0.15       # شانس موفقیت
+BANK_HEIST_MIN = 20000
+BANK_HEIST_MAX = 50000
+BANK_HEIST_FINE = 5000         # جریمه شکست
+BANK_HEIST_JAIL = 3600         # ۱ ساعت بازداشت
+BANK_HEIST_COOLDOWN = 21600    # هر ۶ ساعت
+
+HEIST_SUCCESS_STORIES = [
+    "نصفه‌شب از تونل فاضلاب رفتی تو خزانه! 🕳️💰",
+    "با نقاب خر بانکو زدی و کسی نفهمید! 🎭",
+    "نگهبانا خواب بودن... کیسه رو پر کردی و زدی به چاک! 🏃💨",
+]
+HEIST_FAIL_STORIES = [
+    "آژیر خطر! نگهبانا ریختن سرت! 🚨",
+    "پات به لیزر خورد و همه‌جا قرمز شد! 🔴",
+    "رئیس بانک خودش دم در بود! بدشانسی محض! 😱",
+]
+
+async def bank_heist_command(update, context):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    
+    last = int(get_setting(f"heist_{user.id}", "0") or 0)
+    now = int(time.time())
+    if now - last < BANK_HEIST_COOLDOWN:
+        remaining = BANK_HEIST_COOLDOWN - (now - last)
+        await update.message.reply_text(
+            f"🚔 بانک هنوز تو آماده‌باشه! {remaining//3600} ساعت و {(remaining%3600)//60} دقیقه دیگه بیا.")
+        return
+    
+    set_setting(f"heist_{user.id}", str(now))
+    
+    if random.random() < BANK_HEIST_CHANCE:
+        loot = random.randint(BANK_HEIST_MIN, BANK_HEIST_MAX)
+        add_coins(user.id, loot)
+        await update.message.reply_text(
+            f"🏦💥 **سرقت از بانک موفق شد!!**\n━━━━━━━━━━━━━━\n"
+            f"{random.choice(HEIST_SUCCESS_STORIES)}\n\n"
+            f"💰 {esc_md(user.first_name)} مبلغ **{loot:,}** {CURRENCY_NAME} بلند کرد! 🤑\n"
+            f"🏃 فعلاً آفتابی نشو...",
+            parse_mode="Markdown")
+    else:
+        # 🚨 گیر افتاد: جریمه (اول جیب، بعد بانک) + بازداشت
+        u = get_user(user.id)
+        fine = BANK_HEIST_FINE
+        from_pocket = min(u["coins"] or 0, fine)
+        from_bank = fine - from_pocket
+        with closing(db_connect()) as db:
+            db.execute("UPDATE users SET coins = coins - ?, bank_balance = MAX(0, COALESCE(bank_balance,0) - ?) WHERE user_id = ?",
+                      (from_pocket, from_bank, user.id))
+            db.commit()
+        jail_user(user.id, BANK_HEIST_JAIL)
+        await update.message.reply_text(
+            f"🚨 **گیر افتادی!!**\n━━━━━━━━━━━━━━\n"
+            f"{random.choice(HEIST_FAIL_STORIES)}\n\n"
+            f"💸 جریمه: **{fine:,}** {CURRENCY_NAME}\n"
+            f"🚔 {esc_md(user.first_name)} به **۱ ساعت بازداشت** محکوم شد!\n"
+            f"⛓️ تا آزادی هیچ کاری نمی‌تونی بکنی!",
+            parse_mode="Markdown")
+
+# ============================================================
+# 💨 تریاک — قمار با سلامتی! (منصفانه ولی خطرناک)
+# ============================================================
+
+OPIUM_COST = 10000
+OPIUM_COOLDOWN = 600          # ۱۰ دقیقه بین بست‌ها
+OPIUM_ADDICT_LIMIT = 5        # ۵+ بست در روز = اعتیاد
+OPIUM_BOOST_HOURS = 2         # نئشگی: ×۲ برای ۲ ساعت
+
+def get_opium_boost(user_id):
+    """آیا الان نئشه‌ست؟ (برای ×۲ درآمد کار و عرعر)"""
+    return int(get_setting(f"opium_boost_{user_id}", "0") or 0) > int(time.time())
+
+def is_addict_hungover(user_id):
+    """خماری: دیروز معتاد بوده و امروز هنوز ۲۴ ساعت پاکی نگذشته"""
+    return int(get_setting(f"opium_hangover_{user_id}", "0") or 0) > int(time.time())
+
+def opium_menu_keyboard():
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"💨 بکش بره! ({OPIUM_COST:,})", callback_data="opium_smoke"),
+        InlineKeyboardButton("🏃 نه، پشیمون شدم", callback_data="opium_no")
+    ]])
+
+def opium_menu_text(user_id):
+    u = get_user(user_id)
+    return (
+        f"💨 **بساط تریاک — ساقی طویله**\n━━━━━━━━━━━━━━\n"
+        f"💰 قیمت هر بست: **{OPIUM_COST:,}** {CURRENCY_NAME}\n"
+        f"💳 موجودیت: {u['coins']:,}\n\n"
+        f"😵‍💫 شانس نئشگی توپ: درآمد کار و عرعر **×۲ تا {OPIUM_BOOST_HOURS} ساعت!**\n"
+        f"⚠️ ولی خطر چرت، پلیس و اوردوز هم هست...\n"
+        f"💀 روزی {OPIUM_ADDICT_LIMIT} بست بکشی معتاد می‌شی و فردا خماری!\n\n"
+        f"می‌کشی یا نه؟ 🔥"
+    )
+
+async def opium_smoke(user_id, first_name):
+    """اجرای کشیدن — خروجی: متن نتیجه"""
+    now = int(time.time())
+    
+    # شمارش مصرف امروز (اعتیاد)
+    today = time.strftime("%Y-%m-%d")
+    day_key = get_setting(f"opium_day_{user_id}", "")
+    count = int(get_setting(f"opium_count_{user_id}", "0") or 0) if day_key == today else 0
+    count += 1
+    set_setting(f"opium_day_{user_id}", today)
+    set_setting(f"opium_count_{user_id}", str(count))
+    set_setting(f"opium_last_{user_id}", str(now))
+    
+    addict_note = ""
+    if count == OPIUM_ADDICT_LIMIT:
+        # 💀 معتاد شد! فردا خمار
+        set_setting(f"opium_hangover_{user_id}", str(now + 86400 + 86400))  # از فردا ۲۴ ساعت
+        set_setting(f"opium_addict_{user_id}", "1")
+        addict_note = f"\n\n💀 **{OPIUM_ADDICT_LIMIT} بست تو یه روز؟! معتاد شدی!**\nلقب «خر خراب» گرفتی و فردا خماری — درآمد کارت نصف می‌شه! 🥶"
+    
+    roll = random.random()
+    if roll < 0.45:
+        # 😵‍💫 نئشگی توپ
+        set_setting(f"opium_boost_{user_id}", str(now + OPIUM_BOOST_HOURS * 3600))
+        return (f"😵‍💫 **رفتی تو حس!!**\n━━━━━━━━━━━━━━\n"
+                f"دنیا نرم شد... رنگا قشنگ شدن... عرت از ته دل میاد! 🌈\n\n"
+                f"🚀 تا **{OPIUM_BOOST_HOURS} ساعت** درآمد کار و عرعرت **×۲** شد!\n"
+                f"برو کار کن و عر بزن تا نئشگی هست! 💰{addict_note}")
+    elif roll < 0.65:
+        # 😴 چرت
+        return (f"😴 **چرت زدی!**\n━━━━━━━━━━━━━━\n"
+                f"وسط بساط همونجا خوابت برد... بقیه بستت رو کشیدن! 💨\n"
+                f"💸 {OPIUM_COST:,} {CURRENCY_NAME} دود شد رفت هوا!{addict_note}")
+    elif roll < 0.80:
+        # 🤑 رگ خواب ساقی
+        refund = OPIUM_COST // 2
+        add_coins(user_id, refund)
+        return (f"🤑 **رگ خواب ساقی رو زدی!**\n━━━━━━━━━━━━━━\n"
+                f"ساقی از حرفات خوشش اومد و گفت: «نصفش مهمون من!» 😂\n"
+                f"💰 **+{refund:,}** {CURRENCY_NAME} پس گرفتی!{addict_note}")
+    elif roll < 0.90:
+        # 🤢 حال بد
+        fine = 8000
+        with closing(db_connect()) as db:
+            db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (fine, user_id))
+            db.commit()
+        return (f"🤢 **حالت بد شد!**\n━━━━━━━━━━━━━━\n"
+                f"جنس تقلبی بود! وسط طویله بالا آوردی و همه دیدن! 🙈\n"
+                f"💸 خرج دوا درمون و آبروریزی: **-{fine:,}** {CURRENCY_NAME}{addict_note}")
+    elif roll < 0.97:
+        # 🚔 پلیس
+        fine = 15000
+        with closing(db_connect()) as db:
+            db.execute("UPDATE users SET coins = MAX(0, coins - ?) WHERE user_id = ?", (fine, user_id))
+            db.commit()
+        jail_user(user_id, 1800)
+        return (f"🚔 **پلیس ریخت سر بساط!!**\n━━━━━━━━━━━━━━\n"
+                f"منقل جمع شد، دستبند خورد! 🚨\n"
+                f"💸 جریمه: **-{fine:,}** {CURRENCY_NAME}\n"
+                f"⛓️ **۳۰ دقیقه بازداشت** — هیچ کاری نمی‌تونی بکنی!{addict_note}")
+    else:
+        # 💀 اوردوز
+        u = get_user(user_id)
+        cost = int((u["coins"] or 0) * 0.10)
+        if cost > 0:
+            with closing(db_connect()) as db:
+                db.execute("UPDATE users SET coins = coins - ? WHERE user_id = ?", (cost, user_id))
+                db.commit()
+        return (f"💀 **اوردوز کردی!!**\n━━━━━━━━━━━━━━\n"
+                f"زیاده‌روی کردی و کارت به بیمارستان طویله کشید! 🏥\n"
+                f"💸 خرج درمان (۱۰٪ جیبت): **-{cost:,}** {CURRENCY_NAME}\n"
+                f"🙏 خدا رحم کرد زنده موندی...{addict_note}")
+
+# ============================================================
 # 🆘 گدایی — تور نجات ورشکسته‌ها (هیچکس صفر نمی‌مونه!)
 # ============================================================
 
@@ -1396,8 +1736,8 @@ def collect_wealth_tax(user_id):
 # 🛡️ بیمه خرستان — جبران باخت قمار + سپر دزدی
 # ============================================================
 
-INSURANCE_COST = 5000       # قیمت بیمه‌نامه
-INSURANCE_DAYS = 7          # مدت اعتبار
+INSURANCE_COST = 15000      # قیمت بیمه‌نامه
+INSURANCE_DAYS = 3          # مدت اعتبار
 INSURANCE_REFUND = 0.30     # ۳۰٪ باخت همه بازی‌ها برمی‌گرده
 INSURANCE_REFUND_CAP = 5000 # سقف جبران هر باخت
 
@@ -1563,8 +1903,9 @@ def babies_pending_income(user_id):
     last = int(get_setting(f"baby_claim_{user_id}", "0") or 0)
     now = int(time.time())
     if not last:
-        set_setting(f"baby_claim_{user_id}", str(now))
-        return income, False
+        # 🛟 تایمر گم شده (ری‌استارت بدون بازیابی) — به نفع کاربر: سود آماده‌ست!
+        last = now - 86400
+        set_setting(f"baby_claim_{user_id}", str(last))
     if now - last < 86400:
         return income, False
     return income, True
@@ -1775,13 +2116,55 @@ def mate_check(user_id, user_name, target_id, target_name):
         return f"❌ {esc_md(target_name)} دیگه جا برای کره‌خر جدید نداره! (حداکثر {MAX_BABIES})"
     
     now = int(time.time())
-    if now - u1["last_mate"] < MATE_COOLDOWN:
+    # ❤️ مجوز خریداری‌شده کول‌داون رو دور می‌زنه (یه‌بارمصرف)
+    if now - u1["last_mate"] < MATE_COOLDOWN and not has_mate_pass(user_id):
         remaining = (MATE_COOLDOWN - (now - u1["last_mate"])) // 3600
-        return f"⏳ {esc_md(user_name)} عزیز، {remaining} ساعت دیگه می‌تونی جفت‌گیری کنی!"
-    if now - u2["last_mate"] < MATE_COOLDOWN:
+        return (f"⏳ {esc_md(user_name)} عزیز، {remaining} ساعت دیگه می‌تونی جفت‌گیری کنی!\n\n"
+                f"💰 یا با **{MATE_PASS_COST:,}** {CURRENCY_NAME} همین الان دوباره جفت‌گیری کن!\n"
+                f"بنویس: `خرید جفت‌گیری` (روزی فقط یه بار)")
+    if now - u2["last_mate"] < MATE_COOLDOWN and not has_mate_pass(target_id):
         remaining = (MATE_COOLDOWN - (now - u2["last_mate"])) // 3600
         return f"⏳ {esc_md(target_name)} عزیز، {remaining} ساعت دیگه می‌تونه جفت‌گیری کنه!"
     return None
+
+# ❤️ مجوز جفت‌گیری اضافه — ۳۰هزار، یه‌بارمصرف، روزی یه بار
+MATE_PASS_COST = 30000
+
+def has_mate_pass(user_id):
+    return get_setting(f"mate_pass_{user_id}", "0") == "1"
+
+def consume_mate_pass(user_id):
+    if has_mate_pass(user_id):
+        set_setting(f"mate_pass_{user_id}", "0")
+
+async def buy_mate_reset(update, context):
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    u = get_user(user.id)
+    now = int(time.time())
+    
+    if now - (u["last_mate"] or 0) >= MATE_COOLDOWN:
+        await update.message.reply_text("✅ کول‌داون نداری که! همین الان می‌تونی مجانی جفت‌گیری کنی ❤️")
+        return
+    if has_mate_pass(user.id):
+        await update.message.reply_text("✅ مجوزت رو قبلاً خریدی! برو جفت‌گیری کن ❤️")
+        return
+    # روزی یه بار
+    today = time.strftime("%Y-%m-%d")
+    if get_setting(f"mate_buy_day_{user.id}", "") == today:
+        await update.message.reply_text("😏 امروز یه بار خریدی! فردا دوباره بیا — بدن هم استراحت می‌خواد! 🐴")
+        return
+    if not remove_coins(user.id, MATE_PASS_COST):
+        await update.message.reply_text(f"❌ {MATE_PASS_COST:,} {CURRENCY_NAME} لازمه! داری: {u['coins']:,}")
+        return
+    set_setting(f"mate_pass_{user.id}", "1")
+    set_setting(f"mate_buy_day_{user.id}", today)
+    await update.message.reply_text(
+        f"❤️‍🔥 **مجوز جفت‌گیری خریدی!**\n━━━━━━━━━━━━━━\n"
+        f"💸 {MATE_PASS_COST:,} {CURRENCY_NAME} پرداخت شد.\n"
+        f"حالا روی پیام طرف ریپلی بزن و بنویس `جفت‌گیری`!\n"
+        f"⚠️ فقط برای **یک** جفت‌گیری اعتبار داره!",
+        parse_mode="Markdown")
 
 def mate_do(user_id, target_id):
     """انجام جفت‌گیری بعد از قبول — خروجی: متن نتیجه"""
@@ -1791,6 +2174,7 @@ def mate_do(user_id, target_id):
     
     remove_coins(user_id, MATE_COST)
     remove_coins(target_id, MATE_COST)
+    consume_mate_pass(user_id)  # ❤️ مجوز خریداری‌شده مصرف شد (یه‌بارمصرف)
     
     baby_names = ["کوچولو", "نازنین", "خوشگل", "بازیگوش", "شیطون", "فسقلی", "پشمالو", "عرعرو"]
     baby_name = random.choice(baby_names)
@@ -2495,12 +2879,15 @@ RPS_WINS_NEEDED = 2  # ✊ بهترین از ۳ — ۲ برد = قهرمانی
 
 RPS_COMM_WIN = [
     "🎙️ چه حرکتی! حریف رو غافلگیر کرد! 🔥",
-    "🎙️ خوند دستشو! عالی بود! 🧠",
+    "🎙️ دستشو خوند مثل کتاب باز! 🧠",
     "🎙️ ضربه کاری! تماشاگرا هورا کشیدن! 📣",
+    "🎙️ استاد روانشناسی! می‌دونست چی می‌زنه! 🎭",
+    "🎙️ بی‌رحمانه بود! حریف هنوز تو شوکه! 😱",
 ]
 RPS_COMM_DRAW = [
     "🎙️ مساوی! ذهن‌هاشون یکی شد! 🤝",
-    "🎙️ هر دو یه چیز زدن! دوباره!",
+    "🎙️ هر دو یه چیز زدن! دوباره! 🔄",
+    "🎙️ تله‌پاتی خری! همفکر شدن! 🐴🐴",
 ]
 
 def rps_status_text(room):
@@ -2508,9 +2895,10 @@ def rps_status_text(room):
     p1, p2 = room.players[0], room.players[1]
     w1, w2 = gd["wins"].get(p1, 0), gd["wins"].get(p2, 0)
     lines = [
-        f"✊ **سنگ-کاغذ-قیچی — بهترین از ۳!**",
-        "━━━━━━━━━━━━━━",
-        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}",
+        f"✊ **سنگ‌کاغذقیچی**",
+        "_بهترین از ۳ دست — ۲ برد = قهرمانی_",
+        "━━━━━━━━━━━━━━━━",
+        f"💰 جایزه: **{room.pot():,}** {CURRENCY_NAME}",
         "",
         f"🔵 {uname(p1)}: {'🏅' * w1}{'▫️' * (RPS_WINS_NEEDED - w1)}  ({w1})",
         f"🔴 {uname(p2)}: {'🏅' * w2}{'▫️' * (RPS_WINS_NEEDED - w2)}  ({w2})",
@@ -2788,24 +3176,28 @@ PENALTY_SHOTS = 5  # ⚽ هر بازیکن ۵ ضربه — نوبتی! مساو�
 
 # 🎙️ گزارشگر پنالتی
 PENALTY_COMMENTARY_GOAL = [
-    "🎙️ گگگگلللل!!! چه ضربه‌ای! دروازه‌بان فقط نگاه کرد! 🔥",
-    "🎙️ گل شد! توپ چسبید به گوشه دروازه، عالی بود! 🎯",
-    "🎙️ گللللل! دروازه‌بان شیرجه زد ولی توپ رد شد! 😱",
-    "🎙️ چه گلی! این ضربه رو باید قاب گرفت! 🖼️",
-    "🎙️ گل! خونسرد مثل یه خر حرفه‌ای! بی‌رحمانه زد! 🐴⚽",
+    "گگگگلللل!!! چه ضربه‌ای! دروازه‌بان فقط نگاه کرد! 🔥",
+    "گل شد! توپ چسبید به گوشه دروازه — سانتی‌متری! 🎯",
+    "گللللل! دروازه‌بان شیرجه زد ولی توپ رد شده بود! 🤯",
+    "چه گلی! این ضربه رو باید قاب گرفت زد به دیوار طویله! 🖼️",
+    "گل! خونسرد مثل یه خر حرفه‌ای... بی‌رحمانه! 🐴⚽",
+    "تور تکون خورد! دروازه‌بان هنوز دنبال توپ می‌گرده! 😂",
+    "پنالتی‌زنِ مادرزاد! گل تماشایی! ✨",
 ]
 PENALTY_COMMENTARY_MISS = [
-    "🎙️ ووووی! زد بیرون! توپ رفت هوا! 😵",
-    "🎙️ مهار شد! دروازه‌بان مثل پلنگ پرید! 🧤",
-    "🎙️ به تیرک خورد! چقدر بدشانس! 😩",
-    "🎙️ چیپ زد ولی دروازه‌بان جم نخورد! آبروریزی! 🙈",
-    "🎙️ خراب کرد! فشار پنالتی کمرش رو شکست! 😰",
+    "ووووی! زد بیرون! توپ رفت هوا و برنگشت! 😵",
+    "مهار شد!! دروازه‌بان مثل پلنگ پرید! 🧤",
+    "تیرررک! صدای تیر همه‌جا پیچید! 😩",
+    "چیپ زد ولی دروازه‌بان جُم نخورد! آبروریزی! 🙈",
+    "خراب کرد! فشار پنالتی کمرش رو شکست! 😰",
+    "توپ رفت بیرونِ بیرون... کره‌خرا هم بهش خندیدن! 😂",
+    "پاش لیز خورد! توپ سُر خورد رفت گوشه! 🫠",
 ]
 PENALTY_COMMENTARY_TENSION = [
-    "🎙️ حساس‌ترین لحظه بازی...",
-    "🎙️ سکوت عجیبی طویله رو گرفته...",
-    "🎙️ تماشاگرا نفسشون رو حبس کردن...",
-    "🎙️ عجب بازی نفس‌گیری!",
+    "حساس‌ترین لحظه بازی...",
+    "سکوت عجیبی طویله رو گرفته...",
+    "تماشاگرا نفسشون رو حبس کردن...",
+    "قلب همه داره تند می‌زنه...",
 ]
 
 def penalty_status_text(room, commentary=""):
@@ -2827,11 +3219,12 @@ def penalty_status_text(room, commentary=""):
     shooter = room.players[gd["turn"]]
     shot_no = len(gd["shots"].get(shooter, [])) + 1
     
-    phase = "🥅 **ضربات طلایی — مرگ ناگهانی!**" if gd.get("sudden") else f"🥅 **سری پنالتی — ۵ ضربه‌ای**"
+    phase = "💛 ضربات طلایی — مرگ ناگهانی!" if gd.get("sudden") else "🥅 سری پنالتی ۵ ضربه‌ای"
     lines = [
-        f"⚽ {phase}",
-        "━━━━━━━━━━━━━━",
-        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}",
+        f"⚽ **پنالتی**",
+        f"_{phase}_",
+        "━━━━━━━━━━━━━━━━",
+        f"💰 جایزه: **{room.pot():,}** {CURRENCY_NAME}",
         "",
         f"{'👉' if shooter==p1 else '　'} {uname(p1)}: {strip(s1, total_shots)}  **{g1}**",
         f"{'👉' if shooter==p2 else '　'} {uname(p2)}: {strip(s2, total_shots)}  **{g2}**",
@@ -2890,9 +3283,9 @@ async def penalty_shot_received(room, context, msg, uid, value):
     is_goal = value >= 3
     
     # 🎙️ گزارش این ضربه
-    comm = random.choice(PENALTY_COMMENTARY_GOAL if is_goal else PENALTY_COMMENTARY_MISS)
+    comm = "🎙️ " + random.choice(PENALTY_COMMENTARY_GOAL if is_goal else PENALTY_COMMENTARY_MISS)
     if gd.get("sudden"):
-        comm = random.choice(PENALTY_COMMENTARY_TENSION) + "\n" + comm
+        comm = "🎙️ " + random.choice(PENALTY_COMMENTARY_TENSION) + "\n" + comm
     
     # نوبت بعدی
     gd["turn"] = 1 - gd["turn"]
@@ -2929,7 +3322,7 @@ async def penalty_shot_received(room, context, msg, uid, value):
     
     # 🎙️ گزارش با پیام ریپلای + اعلام نوبت بعدی
     nxt = room.players[gd["turn"]]
-    comm = f"{uname(uid)} ضربه‌شو زد: {'⚽ گل!' if is_goal else '❌ خطا!'}\n{comm}\n\n👉 نوبت: **{uname(nxt)}**"
+    comm = f"⚽ {uname(uid)}: {'✅ گــل!' if is_goal else '❌ از دست رفت!'}\n{comm}\n\n👉 نوبت: **{uname(nxt)}**"
     await send_commentary(room, context, comm)
     await edit_room_msg(room, context, penalty_status_text(room))
     
@@ -2948,7 +3341,7 @@ async def penalty_bot_turn(room, context):
         shots = gd["shots"].setdefault(BOT_ID, [])
         shots.append(value)
         is_goal = value >= 3
-        comm = "🤖 خر بات پشت توپ ایستاد...\n" + random.choice(
+        comm = "🤖 خر بات پشت توپ ایستاد...\n🎙️ " + random.choice(
             PENALTY_COMMENTARY_GOAL if is_goal else PENALTY_COMMENTARY_MISS)
         gd["turn"] = 1 - gd["turn"]
         
@@ -2984,19 +3377,28 @@ THROW_ROUNDS = 5  # 🎲🎯🎳 هر بازیکن ۵ پرتاب — نوبتی�
 
 # 🎙️ گزارشگر پرتاب‌ها
 THROW_COMM_HIGH = {
-    "dice":    ["🎙️ شیش!! تاس آتیش گرفت! 🔥", "🎙️ چه پرتابی! تاس رقصید و بالا نشست! 💃"],
-    "darts":   ["🎙️ وسط خال!! چشم بسته هم می‌زد انگار! 🎯🔥", "🎙️ بولزآی! تماشاگرا از جا پریدن! 😱"],
-    "bowling": ["🎙️ اسسسترایک!!! همه پین‌ها خوابیدن! 🎳💥", "🎙️ چه غرشی! سالن منفجر شد! 🔥"],
+    "dice":    ["شیییش!! تاس آتیش گرفت! 🔥", "چه پرتابی! تاس رقصید و شیش نشست! 💃",
+                "تاس طلایی! انگار جادوش کرده! ✨", "غوغا کرد! طویله رو هوا رفت! 🎉"],
+    "darts":   ["وسط خااال!! چشم‌بسته هم می‌زد انگار! 🎯", "بولزآی!! تماشاگرا از جا پریدن! 🤯",
+                "دقت لیزری! این دیگه انسان نیست! ✨", "چسبید به مرکز! حریف رنگش پرید! 😱"],
+    "bowling": ["اسسسترایک!!! همه پین‌ها خوابیدن! 💥", "چه غرشی! سالن منفجر شد! 🔥",
+                "توپ مثل توپ جنگی رفت! هیچی نموند! 🎳", "پین‌ها فرار کردن! استرایک تمیز! ✨"],
 }
 THROW_COMM_MID = {
-    "dice":    ["🎙️ پرتاب متوسط... می‌شد بهتر باشه!", "🎙️ بد نبود، ولی حریف خوشحال شد! 😏"],
-    "darts":   ["🎙️ نزدیک خال نشست... قابل قبوله!", "🎙️ دارت به تخته چسبید، نه عالی نه بد!"],
-    "bowling": ["🎙️ چند تا پین افتاد... نصفه‌کاره!", "🎙️ ضربه معمولی... جای پیشرفت داره!"],
+    "dice":    ["پرتاب متوسط... می‌شد بهتر باشه! 🤏", "بد نبود، ولی حریف نیشش باز شد! 😏",
+                "نه خوب نه بد — تاسِ محافظه‌کار! 😐"],
+    "darts":   ["نزدیک خال نشست... قابل قبوله! 👌", "به تخته چسبید، نه عالی نه فاجعه! 😌",
+                "دستش لرزید ولی آبروش نرفت! 🤏"],
+    "bowling": ["چند تا پین افتاد... نصفه‌کاره! 🤔", "ضربه معمولی... جای پیشرفت داره! 😐",
+                "نصف پین‌ها موندن سرجاشون! 🙃"],
 }
 THROW_COMM_LOW = {
-    "dice":    ["🎙️ آخ آخ! تاس بهش پشت کرد! 😩", "🎙️ یک؟! این دیگه بدشانسی محضه! 💀"],
-    "darts":   ["🎙️ پرت شد بغل تخته! کجا رو نشونه گرفتی؟! 🙈", "🎙️ افتضاح! دارت رفت تو دیوار! 😵"],
-    "bowling": ["🎙️ رفت تو کانال!! توپ آب خورد! 😭", "🎙️ عجب ضربه‌ای... به هیچی نخورد! 💨"],
+    "dice":    ["آخ آخ! تاس بهش پشت کرد! 😩", "یک؟! این دیگه بدشانسی محضه! 💀",
+                "تاس قهر کرد باهاش! 😤", "این پرتاب رو باید از تاریخ پاک کرد! 🙈"],
+    "darts":   ["پرت شد بغل تخته! کجا رو نشونه گرفتی؟! 🙈", "افتضاح! دارت رفت تو دیوار! 😵",
+                "نزدیک بود بزنه به تماشاگرا! 🏃💨", "دستش لرزید... فاجعه بار اومد! 💀"],
+    "bowling": ["رفت تو کانال!! توپ آب خورد! 😭", "عجب ضربه‌ای... به هیچی نخورد! 💨",
+                "توپ راهشو کج کرد و رفت! 🙄", "پین‌ها حتی نترسیدن! 😂"],
 }
 
 def throw_commentary(gt, value):
@@ -3011,9 +3413,9 @@ def throw_status_text(room):
     emo = EMOJI_OF_GAME[room.game_type]
     shooter = gd["order"][gd["turn"] % len(gd["order"])]
     
-    phase = "💛 **راند طلایی — مرگ ناگهانی!**" if gd.get("sudden") else f"🏁 **{THROW_ROUNDS} پرتاب نوبتی — مجموع بالاتر می‌بره**"
-    lines = [f"{emo} **{GAME_NAMES[room.game_type]}**", phase, "━━━━━━━━━━━━━━",
-             f"💰 جایزه: {room.pot()} {CURRENCY_NAME}", ""]
+    phase = "💛 راند طلایی — مرگ ناگهانی!" if gd.get("sudden") else f"🏁 {THROW_ROUNDS} پرتاب نوبتی • مجموع بالاتر می‌بره"
+    lines = [f"{emo} **{GAME_NAMES[room.game_type]}**", f"_{phase}_", "━━━━━━━━━━━━━━━━",
+             f"💰 جایزه: **{room.pot():,}** {CURRENCY_NAME}", ""]
     
     if gd.get("sudden"):
         for p in gd["order"]:
@@ -3089,15 +3491,16 @@ async def throw_game_end(room, context, winner, note=""):
             record_loss(p, room.bet)
     sudden_txt = " (در راند طلایی! 💛)" if gd.get("sudden") else ""
     await finish_game(room, context,
-        f"{emo} **{GAME_NAMES[room.game_type]} — پایان!**\n━━━━━━━━━━━━━━\n" +
+        f"{emo} **پایان مسابقه {GAME_NAMES[room.game_type]}**\n━━━━━━━━━━━━━━━━\n" +
         "\n".join(lines) +
-        f"\n\n🎙️ تمووووم شد! **{uname(winner)}** قهرمان شد{sudden_txt}!{note}\n"
-        f"💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+        f"\n\n🎙️ سووووت پایان! **{uname(winner)}** قهرمان شد{sudden_txt}!{note}\n"
+        f"💰 جایزه: **{room.pot():,}** {CURRENCY_NAME} 🏆")
 
-async def throw_received(room, context, uid, value, is_bot=False):
+async def throw_received(room, context, uid, value, is_bot=False, is_timeout=False):
     """پردازش یک پرتاب نوبتی (تاس/دارت/بولینگ)"""
     gd = room.game_data
     gt = room.game_type
+    room.last_action = time.time()
     
     # ثبت پرتاب
     if gd.get("sudden"):
@@ -3106,8 +3509,9 @@ async def throw_received(room, context, uid, value, is_bot=False):
         gd["scores"].setdefault(uid, []).append(value)
     gd["turn"] = (gd["turn"] + 1) % len(gd["order"])
     
-    # کمی صبر تا انیمیشن ایموجی تلگرام تموم شه
-    await asyncio.sleep(3.5)
+    # کمی صبر تا انیمیشن ایموجی تلگرام تموم شه (تایم‌اوت انیمیشن نداره)
+    if not is_timeout:
+        await asyncio.sleep(3.5)
     if room.finished or ACTIVE_ROOMS.get(room.room_id) is not room:
         return
     
@@ -3116,7 +3520,10 @@ async def throw_received(room, context, uid, value, is_bot=False):
     
     # 🎙️ گزارش این پرتاب (ریپلای روی پیام اصلی)
     who = "🤖 خر بات" if is_bot else uname(uid)
-    comm = f"{who} انداخت: **{value}**\n{throw_commentary(gt, value)}"
+    if is_timeout:
+        comm = f"💤 {who} خواب موند — پرتاب سوخت: **۰**"
+    else:
+        comm = f"🎯 {who} انداخت: **{value}**\n🎙️ {throw_commentary(gt, value)}"
     
     if winner:
         await send_commentary(room, context, comm)
@@ -3167,15 +3574,122 @@ async def emoji_game_begin(room, context):
     context.application.create_task(emoji_game_deadline_watch(room, context))
     await throw_bot_turn(room, context)
 
+TURN_TIMEOUT_FIRST = 60    # ⏰ بار اول نیومد: ۱ دقیقه → امتیاز صفر
+TURN_TIMEOUT_REPEAT = 30   # ⏰ دوباره نیومد: ۳۰ ثانیه → حذف از بازی!
+
 async def emoji_game_deadline_watch(room, context):
+    """⏱️ ناظر نوبت: دیر بیای اول صفر می‌گیری، تکرار شه حذف می‌شی!"""
     try:
-        # همه بازی‌های ایموجی الان نوبتی‌ان → ۵ دقیقه
-        await asyncio.sleep(300)
-        if ACTIVE_ROOMS.get(room.room_id) is not room or room.finished:
-            return
-        await emoji_game_finish(room, context)
+        while ACTIVE_ROOMS.get(room.room_id) is room and not room.finished:
+            gd = room.game_data
+            # نوبت فعلی کیه؟ (پنالتی: players — پرتابی: order)
+            if room.game_type == "penalty":
+                cur = room.players[gd["turn"]]
+            else:
+                cur = gd["order"][gd["turn"] % len(gd["order"])]
+            
+            slow = cur in gd.setdefault("slowpokes", set())
+            limit = TURN_TIMEOUT_REPEAT if slow else TURN_TIMEOUT_FIRST
+            
+            mark = room.last_action
+            await asyncio.sleep(limit)
+            if ACTIVE_ROOMS.get(room.room_id) is not room or room.finished:
+                return
+            if room.last_action != mark:
+                continue  # حرکتی شده، از اول بپا
+            
+            gd = room.game_data
+            # هنوز نوبت همون نفره؟
+            if room.game_type == "penalty":
+                still = room.players[gd["turn"]] == cur
+            else:
+                still = gd["order"][gd["turn"] % len(gd["order"])] == cur
+            if not still or cur == BOT_ID:
+                continue
+            
+            if not slow:
+                # ⏰ بار اول: امتیاز صفر + اخطار
+                gd["slowpokes"].add(cur)
+                room.last_action = time.time()
+                await send_commentary(room, context,
+                    f"⏰ وقت {uname(cur)} تموم شد! 🎙️ داور اعلام کرد: **پرتاب سوخت — صفر!**\n"
+                    f"⚠️ دفعه بعد فقط {TURN_TIMEOUT_REPEAT} ثانیه وقت داری وگرنه حذفی!")
+                if room.game_type == "penalty":
+                    await penalty_forfeit_shot(room, context, cur)
+                else:
+                    await throw_received(room, context, cur, 0, is_timeout=True)
+            else:
+                # ☠️ تکرار: حذف از بازی
+                await send_commentary(room, context,
+                    f"☠️ {uname(cur)} دوباره غیبش زد! 🎙️ داور از بازی **حذفش کرد!**")
+                await eliminate_player(room, context, cur)
     except Exception as e:
-        logger.warning(f"⚠️ خطا در تایمر بازی ایموجی: {e}")
+        logger.warning(f"⚠️ خطا در ناظر نوبت: {e}")
+
+async def eliminate_player(room, context, uid):
+    """☠️ حذف بازیکن غایب — ۲ نفره: حریف می‌بره | چندنفره: بقیه ادامه می‌دن"""
+    gd = room.game_data
+    room.last_action = time.time()
+    
+    if room.game_type == "penalty" or len([p for p in gd.get("order", room.players) if p != uid]) < 2:
+        # ۲ نفره (یا فقط یه نفر می‌مونه) → بازمانده برنده‌ست
+        if room.game_type == "penalty":
+            others = [p for p in room.players if p != uid]
+        else:
+            others = [p for p in gd["order"] if p != uid]
+        winner = others[0]
+        add_coins(winner, room.pot())
+        record_win(winner)
+        record_loss(uid, room.bet)
+        emo = EMOJI_OF_GAME[room.game_type]
+        await finish_game(room, context,
+            f"{emo} **{GAME_NAMES[room.game_type]} — پایان!**\n━━━━━━━━━━━━━━\n"
+            f"🎙️ {uname(uid)} به خاطر غیبت حذف شد!\n\n"
+            f"🏆 برنده: **{uname(winner)}**\n💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+        return
+    
+    # چندنفره: از چرخه خارج شه، بقیه ادامه بدن
+    idx = gd["order"].index(uid)
+    gd["order"].remove(uid)
+    record_loss(uid, room.bet)
+    if gd["turn"] >= len(gd["order"]):
+        gd["turn"] = 0
+    elif idx < gd["turn"]:
+        gd["turn"] -= 1
+    gd["turn"] %= len(gd["order"])
+    PLAYER_IN_GAME.pop(uid, None)
+    
+    nxt = gd["order"][gd["turn"]]
+    await send_commentary(room, context, f"👥 بازی با {len(gd['order'])} نفر ادامه پیدا می‌کنه!\n👉 نوبت: **{uname(nxt)}**")
+    await edit_room_msg(room, context, throw_status_text(room))
+    await throw_bot_turn(room, context)
+
+async def penalty_forfeit_shot(room, context, uid):
+    """⚽ ضربه سوخته پنالتی (تایم‌اوت بار اول) = خطا"""
+    gd = room.game_data
+    gd["shots"].setdefault(uid, []).append(0)  # 0 = خطا
+    gd["turn"] = 1 - gd["turn"]
+    
+    winner = penalty_decided(room)
+    if winner:
+        p1, p2 = room.players[0], room.players[1]
+        loser = p2 if winner == p1 else p1
+        g1 = sum(1 for v in gd["shots"].get(p1, []) if v >= 3)
+        g2 = sum(1 for v in gd["shots"].get(p2, []) if v >= 3)
+        add_coins(winner, room.pot())
+        record_win(winner)
+        record_loss(loser, room.bet)
+        await finish_game(room, context,
+            f"⚽ **پنالتی — پایان!**\n━━━━━━━━━━━━━━\n"
+            f"📊 {uname(p1)}: {g1} گل | {uname(p2)}: {g2} گل\n"
+            f"🏆 برنده: **{uname(winner)}**\n💰 جایزه: {room.pot()} {CURRENCY_NAME}")
+        return
+    if gd.get("sudden") and not gd.get("sudden_announced"):
+        gd["sudden_announced"] = True
+    nxt = room.players[gd["turn"]]
+    await send_commentary(room, context, f"👉 نوبت: **{uname(nxt)}**")
+    await edit_room_msg(room, context, penalty_status_text(room))
+    await penalty_bot_turn(room, context)
 
 async def emoji_game_finish(room, context):
     """⏰ فقط برای تایم‌اوت — هر کی سر نوبتش نیومد بازنده‌ست"""
@@ -4378,13 +4892,15 @@ def export_db_json():
         donkeys = [dict(r) for r in db.execute("SELECT * FROM donkeys").fetchall()]
         chats = [dict(r) for r in db.execute("SELECT * FROM chats").fetchall()]
         settings = [dict(r) for r in db.execute("SELECT * FROM settings").fetchall()]
+        league = [dict(r) for r in db.execute("SELECT * FROM league").fetchall()]
     return {
         "version": 1,
         "exported_at": int(time.time()),
         "users": users,
         "donkeys": donkeys,
         "chats": chats,
-        "settings": settings
+        "settings": settings,
+        "league": league
     }
 
 def import_db_json(data):
@@ -4426,6 +4942,11 @@ def import_db_json(data):
             if "key" not in st: continue
             db.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                       (st["key"], st.get("value", "")))
+        # 🏆 لیگ هفتگی هم برگرده
+        for lg in data.get("league", []):
+            if "user_id" not in lg: continue
+            db.execute("INSERT OR REPLACE INTO league (user_id, earned) VALUES (?, ?)",
+                      (lg["user_id"], lg.get("earned", 0)))
         db.commit()
     return count
 
@@ -4710,14 +5231,16 @@ HELP_SECTIONS = {
         "🔊 عرعر کن! — هر صدا ۱۵۰ تا ۱۲۰۰ شانسی (هر ۵ دقیقه)\n"
         "🦹 `دزدی` (با ریپلی) — ۴۰٪ شانس، ولی جریمه داره! (هر ۲ ساعت)\n"
         "🆘 `گدایی` — ورشکستی؟ مردم کمکت می‌کنن! (هر ۴ ساعت)\n"
+        "🏦 `دزدی بانک` — شانس کم، جایزه تا ۵۰هزار! گیر بیفتی ۱ ساعت حبسی! (هر ۶ ساعت)\n"
+        "💨 `تریاک` — نئشه شی درآمدت ×۲ می‌شه... ولی خطرناکه! (۱۰هزار)\n"
         "💸 `انتقال 100` (با ریپلی یا آیدی) — سکه بده به رفیقت (۱۰٪ مالیات، سقف ۱۰۰هزار)\n\n"
         "🏦 **بانک خرستان:**\n"
-        "`بانک` — حسابت | `واریز 1000` | `برداشت همه`\n"
-        "💹 `سود` — روزی **۳۰٪ سود**! ⚠️ هر روز باید خودت برداری وگرنه می‌سوزه!\n"
+        "`بانک` — حسابت | `واریز 1000` / `واریز همه` | `برداشت همه`\n"
+        "💹 `سود` — روزی **۲۰٪ سود**! ⚠️ هر روز باید خودت برداری وگرنه می‌سوزه!\n"
         "💳 `وام 5000` (ریپلی روی ضامن سطح ۲+) — وام تا ۳۰هزار برای فقرا | `تسویه وام`\n"
         "🛡️ پولت توی بانک از دزدی در امانه!\n\n"
         "🛡️ **بیمه خرستان:**\n"
-        "`بیمه` — وضعیت | `خرید بیمه` — ۵۰۰۰ برای ۷ روز\n"
+        "`بیمه` — وضعیت | `خرید بیمه` — ۱۵هزار برای ۳ روز\n"
         "📉 ۳۰٪ باخت **همه بازی‌ها** خودکار برمی‌گرده + دزدها حریفت نمی‌شن!"
     ),
     "help_sounds": SOUNDS_LIST_TEXT,
@@ -4872,7 +5395,8 @@ FJ_KNOWN_CMDS = {
     "babies", "پنل کره‌خر", "پنل کره خر",
     "لغو بازی", "لغوبازی", "خروج از بازی", "cancelgame",
     "بانک", "bank", "حساب بانکی", "بیمه", "insurance", "خرید بیمه", "خریدبیمه", "بیمه بخر",
-    "گدایی", "کمک مالی", "beg",
+    "گدایی", "کمک مالی", "beg", "تریاک", "بساط", "opium", "لیگ", "جدول هفتگی", "لیگ هفتگی", "league",
+    "دزدی بانک", "دزدی از بانک", "سرقت بانک", "سرقت از بانک", "خرید جفت‌گیری", "خرید جفتگیری", "خرید جفت گیری",
     "سود", "سود بانک", "برداشت سود", "تسویه وام", "تسویه‌وام", "تسویه"
 }
 FJ_FIRST_WORD_CMDS = {"اسلات", "slot", "دوبل", "double", "انتقال", "transfer", "هدیه", "ارتقا", "اسم", "خرجان", "خردانا", "واریز", "برداشت", "deposit", "withdraw", "وام", "loan"}
@@ -4958,6 +5482,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 شما بن شده‌اید!")
         return
     
+    # ⛓️ بازداشت؟ هیچ دستوری کار نمی‌کنه (فقط به دستورات ربات جواب بده، نه چت عادی)
+    jail_left = is_jailed(user.id)
+    if jail_left > 0:
+        if looks_like_bot_command(update, context, text):
+            await update.message.reply_text(
+                f"🚔 **تو بازداشتی!** ⛓️\n"
+                f"⏳ {jail_left // 60} دقیقه و {jail_left % 60} ثانیه دیگه آزاد می‌شی.\n"
+                f"تا اون موقع هیچ کاری نمی‌تونی بکنی! 😏")
+        return
+    
     # 🔒 جوین اجباری — بدون عضویت هیچ دستوری کار نمی‌کنه
     if not await force_join_gate(update, context, user.id):
         return
@@ -5005,17 +5539,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== شروع =====
     if text.startswith("/start"):
         await reply_menu(update,
-            "🫏✨ **به طویله خرستان خوش آمدید!** ✨🫏\n"
-            "━━━━━━━━━━━━━━\n"
-            "🎮 ۹ بازی گروهی + اسلات و دوبل\n"
-            "🔊 ۱۲ صدای خر با پوینت و رتبه‌بندی\n"
-            "💼 کار کن، 🎡 گردونه بچرخون، 🔮 فال بگیر\n"
-            "🦹 از رفیقات بدزد (به ریسک خودت! 😏)\n"
-            "🎁 جایزه روزانه + 💸 انتقال سکه به رفیقا\n"
-            "❤️ جفت‌گیری کن و کره‌خر دار شو\n"
-            "🎀 خرت رو خوشتیپ کن و به همه پز بده\n"
-            "━━━━━━━━━━━━━━\n"
-            "📖 برای دیدن همه دستورات: **راهنما**",
+            "🫏✨ **به طویله خرستان خوش اومدی!** ✨🫏\n"
+            "━━━━━━━━━━━━━━━━\n\n"
+            "🎮  **۱۴ بازی گروهی** با گزارشگر زنده\n"
+            "🎰  اسلات و دوبل برای قماربازها\n"
+            "🏦  بانک با سود روزانه + وام و بیمه\n"
+            "🐣  کره‌خر بزرگ کن، سود روزانه بگیر\n"
+            "🔊  **۱۶ مدل عرعر** — هر عر تا ۱٬۲۰۰ تی‌تاپ!\n"
+            "🏆  لیگ هفتگی با جایزه ۲۰۰ هزارتایی\n"
+            "🧠  خر دانا — هوش مصنوعی خودمون!\n\n"
+            "━━━━━━━━━━━━━━━━\n"
+            "📖 همه دستورات: بنویس **راهنما**",
             main_menu()
         )
         return
@@ -5210,6 +5744,31 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # ===== دزدی =====
+    # ===== 🏦🦹 دزدی از بانک =====
+    if text in ["دزدی بانک", "دزدی از بانک", "سرقت بانک", "سرقت از بانک"]:
+        await bank_heist_command(update, context)
+        return
+    
+    # ===== 💨 تریاک (منوی تایید) =====
+    if text in ["تریاک", "بساط", "opium"]:
+        last_op = int(get_setting(f"opium_last_{user.id}", "0") or 0)
+        if int(time.time()) - last_op < OPIUM_COOLDOWN:
+            rem = OPIUM_COOLDOWN - (int(time.time()) - last_op)
+            await update.message.reply_text(f"💨 ساقی گفت: صبر کن دود قبلی بره هوا! {rem//60} دقیقه دیگه بیا.")
+            return
+        await reply_menu(update, opium_menu_text(user.id), opium_menu_keyboard())
+        return
+    
+    # ===== ⚡ لیگ هفتگی =====
+    if text in ["لیگ", "جدول هفتگی", "لیگ هفتگی", "league"]:
+        await update.message.reply_text(league_text(user.id), parse_mode="Markdown")
+        return
+    
+    # ===== ❤️ خرید جفت‌گیری دوباره =====
+    if text in ["خرید جفت‌گیری", "خرید جفتگیری", "خرید جفت گیری"]:
+        await buy_mate_reset(update, context)
+        return
+    
     if text in ["دزدی", "سرقت", "rob"]:
         await rob_command(update, context)
         return
@@ -5254,10 +5813,23 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     parts_bank = text.split()
     if parts_bank and parts_bank[0] in ["واریز", "deposit"]:
-        if len(parts_bank) < 2 or not parts_bank[1].translate(FA_DIGITS).isdigit():
-            await update.message.reply_text("🏦 روش استفاده: `واریز 1000`", parse_mode="Markdown")
+        if len(parts_bank) < 2:
+            await update.message.reply_text("🏦 روش استفاده: `واریز 1000` یا `واریز همه`", parse_mode="Markdown")
             return
-        await bank_deposit(update, context, int(parts_bank[1].translate(FA_DIGITS)))
+        arg = parts_bank[1].translate(FA_DIGITS)
+        if arg in ["همه", "کل", "all"]:
+            # 💰 واریز کل جیب به بانک
+            u = get_user(user.id)
+            amount = u["coins"] or 0
+            if amount < BANK_MIN_DEPOSIT:
+                await update.message.reply_text(f"❌ جیبت ({amount:,}) کمتر از حداقل واریزه ({BANK_MIN_DEPOSIT})!")
+                return
+            await bank_deposit(update, context, amount)
+            return
+        if not arg.isdigit():
+            await update.message.reply_text("🏦 روش استفاده: `واریز 1000` یا `واریز همه`", parse_mode="Markdown")
+            return
+        await bank_deposit(update, context, int(arg))
         return
     
     # 💹 برداشت سود روزانه
@@ -5327,7 +5899,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== منو =====
     if text in ["منو", "menu", "خانه"]:
-        await reply_menu(update, "🏠 **منوی اصلی طویله**", main_menu())
+        await reply_menu(update, "🏠 **منوی اصلی طویله خرستان**\n━━━━━━━━━━━━━━━━\nچی کار می‌خوای بکنی؟ 👇", main_menu())
         return
     
     # ===== لیست بازی‌ها =====
@@ -5416,29 +5988,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # ===== جدول =====
     if text in ["جدول", "ج", "leaderboard", "top"]:
-        with closing(db_connect()) as db:
-            rows = db.execute(
-                "SELECT user_id, name, coins, level, coins + COALESCE(bank_balance,0) as wealth FROM users ORDER BY wealth DESC LIMIT 10"
-            ).fetchall()
-            user_row = db.execute(
-                "SELECT COUNT(*) + 1 as rank FROM users WHERE coins + COALESCE(bank_balance,0) > (SELECT coins + COALESCE(bank_balance,0) FROM users WHERE user_id = ?)",
-                (user.id,)
-            ).fetchone()
-        
-        if not rows:
-            await update.message.reply_text("❌ هنوز کسی ثبت نشده!")
-            return
-        
-        msg = "🏆 **جدول ثروتمندان طویله**\n━━━━━━━━━━━━━━━━\n"
-        for i, row in enumerate(rows, 1):
-            medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f"{i}."
-            title = get_title_by_level(row["level"])
-            msg += f"{medal} {title} {esc_md(row['name'])} — {row['wealth']:,}\n"
-        
-        if user_row and user_row["rank"]:
-            msg += f"\n━━━━━━━━━━━━━━━━\n👤 رتبه شما: #{user_row['rank']}"
-        
-        await update.message.reply_text(msg, parse_mode="Markdown")
+        await reply_menu(update,
+            "🏆 **کدوم جدول رو می‌خوای ببینی؟**",
+            leaderboard_choice_keyboard())
         return
     
     # ===== صدای خر =====
@@ -5526,7 +6078,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             gift = OWNER_GIFTS[gift_name]
             ensure_user(target.id, target.first_name)
-            add_coins(target.id, gift["coins"])
+            add_coins(target.id, gift["coins"], league=False)
             await update.message.reply_text(
                 f"🎁 **کادو از طرف مالک طویله!**\n"
                 f"━━━━━━━━━━━━━━\n"
@@ -5540,7 +6092,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             try:
                 amt = int(parts[1].translate(FA_DIGITS))
                 ensure_user(target.id, target.first_name)
-                add_coins(target.id, amt)
+                add_coins(target.id, amt, league=False)
                 await update.message.reply_text(f"💰 {amt:,} {CURRENCY_NAME} به {esc_md(target.first_name)} اضافه شد!")
             except (ValueError, IndexError):
                 pass
@@ -5806,7 +6358,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== خانه =====
     if data == "home":
         await query.edit_message_text(
-            "🏠 **منوی اصلی طویله**",
+            "🏠 **منوی اصلی طویله خرستان**\n━━━━━━━━━━━━━━━━\nچی کار می‌خوای بکنی؟ 👇",
             reply_markup=main_menu(),
             parse_mode="Markdown"
         )
@@ -5988,6 +6540,46 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # ===== پروفایل =====
+    # ===== 🏆 انتخاب جدول =====
+    if data == "lb_total":
+        await query.edit_message_text(
+            total_leaderboard_text(user.id),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⚡ لیگ هفتگی", callback_data="lb_week"),
+                                                InlineKeyboardButton("🏠 منو", callback_data="home")]]),
+            parse_mode="Markdown")
+        return
+    
+    if data == "lb_week":
+        await query.edit_message_text(
+            league_text(user.id),
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏆 جدول کلی", callback_data="lb_total"),
+                                                InlineKeyboardButton("🏠 منو", callback_data="home")]]),
+            parse_mode="Markdown")
+        return
+    
+    # ===== 💨 تریاک =====
+    if data == "opium_no":
+        await query.edit_message_text("🏃 عاقلانه بود! پولت تو جیبت موند، سلامتیت سر جاش. آفرین خر عاقل! 🐴✅")
+        return
+    
+    if data == "opium_smoke":
+        # کول‌داون و بازداشت چک شه
+        if is_jailed(user.id):
+            await query.answer("🚔 تو بازداشتی! چی می‌کشی؟!", show_alert=True)
+            return
+        last_op = int(get_setting(f"opium_last_{user.id}", "0") or 0)
+        if int(time.time()) - last_op < OPIUM_COOLDOWN:
+            await query.answer(f"💨 صبر کن دود قبلی بره هوا! {(OPIUM_COOLDOWN-(int(time.time())-last_op))//60} دقیقه دیگه", show_alert=True)
+            return
+        if not remove_coins(user.id, OPIUM_COST):
+            u = get_user(user.id)
+            await query.answer(f"❌ {OPIUM_COST:,} لازمه! داری: {u['coins']:,}", show_alert=True)
+            return
+        await query.answer("💨 ...")
+        result = await opium_smoke(user.id, user.first_name)
+        await query.edit_message_text(result, parse_mode="Markdown")
+        return
+    
     # ===== 🏦 پنل بانک =====
     if data == "bankp_home":
         await query.edit_message_text(bank_panel_text(user.id),
@@ -6291,6 +6883,12 @@ async def auto_backup_job(context: ContextTypes.DEFAULT_TYPE):
 async def janitor_job(context: ContextTypes.DEFAULT_TYPE):
     """🧹 نظافتچی دوره‌ای: هر دقیقه اتاق‌های گیرکرده رو پاک می‌کنه و به گروه خبر می‌ده"""
     now = time.time()
+    # 🏆 پایان هفته لیگ؟
+    try:
+        if now > league_get_end():
+            await league_settle(context)
+    except Exception as e:
+        logger.error(f"❌ خطا در بستن لیگ: {e}")
     for rid in list(ACTIVE_ROOMS.keys()):
         room = ACTIVE_ROOMS.get(rid)
         if not room or room.finished:
