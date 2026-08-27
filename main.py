@@ -1008,7 +1008,39 @@ async def transfer_command(update: Update, context: ContextTypes.DEFAULT_TYPE, a
 # 5.1 🏦 بانک (سپرده/سود روزانه/واریز و برداشت)
 # ============================================================
 
-BANK_INTEREST = 0.20        # ۲۰٪ سود روزانه
+BANK_INTEREST = 0.20        # ۲۰٪ سود روزانه (پله اول — قابل تنظیم از پنل اونر)
+
+# 💹 سود بانک پله‌ای — قابل دستکاری توسط اونر با «تنظیم اقتصاد»
+def econ_get(key, default):
+    """⚙️ پارامتر اقتصادی از DB (اونر می‌تونه عوضش کنه) — عدد صحیح"""
+    try:
+        return int(float(get_setting(f"econ_{key}", "") or default))
+    except (ValueError, TypeError):
+        return int(default)
+
+def econ_get_f(key, default):
+    """⚙️ پارامتر اقتصادی اعشاری (نرخ‌ها به درصد ذخیره می‌شن)"""
+    try:
+        return float(get_setting(f"econ_{key}", "") or default)
+    except (ValueError, TypeError):
+        return float(default)
+
+# پیش‌فرض‌های اقتصاد پله‌ای
+ECON_DEFAULTS = {
+    "bank_t1": 100000,     # سقف پله ۱ بانک
+    "bank_r1": 20,         # ٪ سود پله ۱
+    "bank_t2": 1000000,    # سقف پله ۲
+    "bank_r2": 5,          # ٪ سود پله ۲
+    "bank_r3": 1,          # ٪ سود بالای پله ۲
+    "tax_t1": 500000,      # شروع مالیات
+    "tax_r1": 2,           # ٪ مالیات عادی
+    "tax_t2": 5000000,     # شروع مالیات سنگین
+    "tax_r2": 5,           # ٪ مالیات نهنگ‌ها
+}
+
+def bank_tiered_interest(balance):
+    """💹 سود بانک: نرخ ثابت ۲۰٪ برای همه — بدون پله (به درخواست اونر!)"""
+    return int(balance * BANK_INTEREST)
 BANK_INTEREST_CAP = 10**12  # بدون سقف عملی
 BANK_MIN_DEPOSIT = 500
 BANK_MAX_BALANCE = 10**15   # ♾️ بدون سقف — هر چقدر بخوای بریز!
@@ -1032,8 +1064,8 @@ def bank_pending_interest(user_id):
             db.commit()
     if now - last < 86400:
         return 0, False
-    # ⚠️ فقط سود یک روز — دیر بیای، سود روزهای قبل سوخته!
-    return min(int(balance * BANK_INTEREST), BANK_INTEREST_CAP), True
+    # ⚠️ فقط سود یک روز — دیر بیای، سود روزهای قبل سوخته! (پله‌ای: پول بیشتر = نرخ کمتر)
+    return min(bank_tiered_interest(balance), BANK_INTEREST_CAP), True
 
 def bank_apply_interest(user_id):
     """(سازگاری با کد قدیمی) — دیگه خودکار واریز نمی‌کنه، فقط صفر برمی‌گردونه"""
@@ -1480,6 +1512,80 @@ def is_jailed(user_id):
     until = get_jail_until(user_id)
     now = int(time.time())
     return max(0, until - now)
+
+# 💰 وثیقه: آزادی زودهنگام از بازداشت — گرونه!
+BAIL_PER_HOUR = 20000   # هر ۱ ساعت حبس = ۲۰,۰۰۰ (نسبتی: نیم ساعت = ۱۰,۰۰۰)
+
+def bail_amount(user_id):
+    """محاسبه وثیقه بر اساس زمان باقی‌مونده حبس (نسبتی، رند به ۵۰۰)"""
+    left = is_jailed(user_id)
+    if left <= 0:
+        return 0
+    amt = int(left / 3600 * BAIL_PER_HOUR)
+    return max(500, (amt // 500) * 500)  # رند به ۵۰۰، حداقل ۵۰۰
+
+async def bail_command(update, context):
+    """⚖️ وثیقه — فقط یه رفیق می‌تونه برات بذاره، نه خودت!
+    زندانی: «وثیقه» → وضعیت + راهنما
+    رفیق: ریپلای رو زندانی + «وثیقه» → منوی پرداخت"""
+    user = update.effective_user
+    ensure_user(user.id, user.first_name)
+    
+    # 🤝 با ریپلای: پرداخت وثیقه برای یکی دیگه
+    if update.message.reply_to_message:
+        target = update.message.reply_to_message.from_user
+        if target.is_bot:
+            await update.message.reply_text("❌🤖 ربات که زندان نمی‌ره!")
+            return
+        if target.id == user.id:
+            await update.message.reply_text(
+                "⚖️ **خودت نمی‌تونی وثیقه خودت رو بذاری!**\n"
+                "قانون طویله‌ست — باید یه رفیق برات بذاره! 🤝\n"
+                "😏 اگه رفیق نداری... آب خنکت رو بخور!",
+                parse_mode="Markdown")
+            return
+        left = is_jailed(target.id)
+        if left <= 0:
+            await update.message.reply_text(f"😊 {esc_md(target.first_name)} که آزاده! وثیقه واسه چی؟", parse_mode="Markdown")
+            return
+        ensure_user(target.id, target.first_name)
+        amt = bail_amount(target.id)
+        u = get_user(user.id)
+        if (u["coins"] or 0) < amt:
+            await update.message.reply_text(
+                f"⚖️ وثیقه {esc_md(target.first_name)}: **{amt:,}** {CURRENCY_NAME}\n"
+                f"💳 داری: {u['coins']:,} — پولت نمی‌رسه! 😞",
+                parse_mode="Markdown")
+            return
+        await update.message.reply_text(
+            f"⚖️ **پرداخت وثیقه برای رفیق**\n━━━━━━━━━━━━━━\n"
+            f"⛓️ زندانی: **{esc_md(target.first_name)}**\n"
+            f"⏳ حبس باقی‌مونده: {left // 60} دقیقه\n"
+            f"💰 وثیقه: **{amt:,}** {CURRENCY_NAME} (نرخ: {BAIL_PER_HOUR:,}/ساعت)\n\n"
+            f"🤝 از جیب **تو** کم می‌شه — مطمئنی؟",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton(f"💰 آره، آزادش کن! ({amt:,})", callback_data=f"bail_pay_{target.id}"),
+                InlineKeyboardButton("🙅 بیخیال", callback_data="bail_no")]]),
+            parse_mode="Markdown")
+        return
+    
+    # 😞 بدون ریپلای: فقط وضعیت — خودش نمی‌تونه!
+    left = is_jailed(user.id)
+    if left <= 0:
+        await update.message.reply_text(
+            "😊 تو که آزادی خر جون!\n"
+            "⚖️ رفیقت زندانه؟ رو پیامش **ریپلای** بزن و بنویس `وثیقه` تا آزادش کنی!",
+            parse_mode="Markdown")
+        return
+    amt = bail_amount(user.id)
+    await update.message.reply_text(
+        f"⚖️ **وثیقه آزادی**\n━━━━━━━━━━━━━━\n"
+        f"⛓️ حبس باقی‌مونده: **{left // 60} دقیقه**\n"
+        f"💰 وثیقه: **{amt:,}** {CURRENCY_NAME} (نرخ: {BAIL_PER_HOUR:,}/ساعت)\n\n"
+        f"🚫 **خودت نمی‌تونی بذاریش — قانون طویله‌ست!**\n"
+        f"🤝 یه رفیق باید رو یکی از پیام‌هات ریپلای بزنه و بنویسه `وثیقه`\n"
+        f"😏 حالا معلوم می‌شه کی واقعاً رفیقته!",
+        parse_mode="Markdown")
 
 # ============================================================
 # 5.4 🏆 لیگ هفتگی (شنبه تا جمعه ایران)
@@ -2169,39 +2275,42 @@ def rally_resolve_pro(p1, eff1, p2, eff2):
 def _rally_bar(pos, total=8):
     return "🏁" + "▰" * min(pos, total) + "▱" * max(0, total - pos)
 
-async def rally_run(context, p1, p2, bet, chat_ids, global_match=False):
-    """🎬 اجرای سینمایی مسابقه: گزارش زنده مرحله‌ای + نتیجه با الگوریتم حرفه‌ای"""
+async def rally_run(context, players, bet, chat_ids):
+    """🎬 اجرای سینمایی مسابقه ۲ تا ۵ نفره: گزارش زنده مرحله‌ای + الگوریتم حرفه‌ای"""
     track = random.choice(RALLY_TRACKS)
-    eff1, det1 = rally_effective_power(p1, track)
-    eff2, det2 = rally_effective_power(p2, track)
-    winner, wc = rally_resolve_pro(p1, eff1, p2, eff2)
+    effs, dets = {}, {}
+    for p in players:
+        effs[p], dets[p] = rally_effective_power(p, track)
+    
+    # 🎯 رتبه‌بندی نهایی: قدرت مؤثر × ضریب شانس فینیش (شگفتی ممکن!)
+    finish = {p: effs[p] * random.uniform(0.80, 1.20) for p in players}
+    ranking = sorted(players, key=lambda p: -finish[p])
+    # 🤝 مساوی فقط ۲ نفره: ۸٪
+    is_draw = len(players) == 2 and random.random() < RALLY_DRAW_CHANCE
+    winner = None if is_draw else ranking[0]
     
     # ثبت مسابقه تو لاگ خستگی
     now = time.time()
-    RALLY_RACE_LOG.setdefault(p1, []).append(now)
-    RALLY_RACE_LOG.setdefault(p2, []).append(now)
-    
-    pw1, pw2 = det1["base"], det2["base"]
-    tag = "🏇 **رالی خرستان!**"
+    for p in players:
+        RALLY_RACE_LOG.setdefault(p, []).append(now)
     
     def notes(det):
         out = []
-        if det["track"]: out.append(f"🗺️ تخصص پیست +{det['track']}")
-        if det["streak"]: out.append(f"🔥 روحیه +{det['streak']}")
-        if det["fatigue"]: out.append("😮‍💨 خسته!")
-        if det["dizzy"]: out.append("💫 گیج!")
-        return (" | ".join(out)) if out else ""
+        if det["track"]: out.append(f"🗺️+{det['track']}")
+        if det["streak"]: out.append(f"🔥+{det['streak']}")
+        if det["fatigue"]: out.append("😮‍💨")
+        if det["dizzy"]: out.append("💫")
+        return (" " + " ".join(out)) if out else ""
     
-    n1, n2 = notes(det1), notes(det2)
-    header = (f"{tag}\n━━━━━━━━━━━━━━\n"
+    header = (f"🏇 **رالی خرستان!** ({len(players)} خر مسابقه‌ای)\n━━━━━━━━━━━━━━\n"
               f"{track['emoji']} پیست: **{track['name']}** (بونوس: {track['cat_name']})\n"
               f"_{track['flavor']}_\n"
-              f"💰 شرط: {bet:,} {CURRENCY_NAME}\n"
-              f"━━━━━━━━━━━━━━\n"
-              f"🐴 {uname(p1)} ⚡{pw1}" + (f"  {n1}" if n1 else "") + "\n"
-              f"🐴 {uname(p2)} ⚡{pw2}" + (f"  {n2}" if n2 else "") + "\n\n")
+              f"💰 شرط هر نفر: {bet:,} | 🏆 جایزه: **{bet * len(players):,}** {CURRENCY_NAME}\n"
+              f"━━━━━━━━━━━━━━\n" +
+              "\n".join(f"🐴 {uname(p)} ⚡{dets[p]['base']}{notes(dets[p])}" for p in players) +
+              "\n\n")
     
-    # 📤 پیام اولیه به همه چت‌ها
+    # 📤 پیام اولیه
     msgs = []
     for cid in set(chat_ids):
         try:
@@ -2220,89 +2329,97 @@ async def rally_run(context, p1, p2, bet, chat_ids, global_match=False):
             except Exception:
                 pass
     
-    # 🎬 سناریوی مرحله‌ای — جایگاه‌ها بر اساس برنده نهایی چیده می‌شن (با فراز و نشیب!)
-    lead = winner if winner else random.choice([p1, p2])
-    chase = p2 if lead == p1 else p1
-    # مرحله ۱: استارت
+    def stage_board(order, positions):
+        """نوار پیشرفت مرحله‌ای بر اساس ترتیب فعلی"""
+        return "\n".join(f"{_rally_bar(positions[i])} {uname(p)}" for i, p in enumerate(order))
+    
+    # 🎬 مراحل: ترتیب‌ها قاطی می‌شن که هیجان بمونه — آخرش ترتیب واقعی
+    final_order = ranking if winner else [players[0], players[1]]
+    # مرحله ۱: استارت — ترتیب رندوم
+    mid_order = players[:]
+    random.shuffle(mid_order)
     await asyncio.sleep(2)
     await update_all(
-        f"🏁 **استارت زده شد!!** دوتا خر مثل فشنگ در رفتن! 💨\n\n"
-        f"{_rally_bar(2)} {uname(lead)}\n{_rally_bar(2)} {uname(chase)}\n\n"
+        f"🏁 **استارت زده شد!!** {len(players)} تا خر مثل فشنگ در رفتن! 💨\n\n"
+        f"{stage_board(mid_order, [2] * len(players))}\n\n"
         f"🎙️ {random.choice(RALLY_EVENTS_CLOSE)}")
-    # مرحله ۲: وسط مسیر — تعقیب‌کننده جلو می‌زنه (هیجان!)
+    # مرحله ۲: وسط مسیر — یکی غیر از برنده جلو می‌زنه (هیجان!)
     await asyncio.sleep(2.5)
-    ev = random.choice(RALLY_EVENTS_LEAD).format(A=uname(chase))
+    mid2 = players[:]
+    random.shuffle(mid2)
+    if winner and mid2[0] == winner and len(mid2) > 1:
+        mid2[0], mid2[1] = mid2[1], mid2[0]
+    ev = random.choice(RALLY_EVENTS_LEAD).format(A=uname(mid2[0]))
     await update_all(
         f"🌀 **پیچ وسط مسیر!**\n\n"
-        f"{_rally_bar(4)} {uname(chase)}\n{_rally_bar(3)} {uname(lead)}\n\n"
-        f"🎙️ {ev}\n😱 سبقت!! {uname(chase)} جلو زد!")
-    # مرحله ۳: نزدیک پایان — برنده واقعی برمی‌گرده جلو
+        f"{stage_board(mid2, [4 - min(i, 2) for i in range(len(mid2))])}\n\n"
+        f"🎙️ {ev}\n😱 {uname(mid2[0])} جلو زد!")
+    # مرحله ۳: صد متر آخر — ترتیب واقعی برمی‌گرده
     await asyncio.sleep(2.5)
-    ev2 = random.choice(RALLY_EVENTS_BEHIND).format(B=uname(chase))
+    last_p = final_order[-1]
+    ev2 = random.choice(RALLY_EVENTS_BEHIND).format(B=uname(last_p))
     await update_all(
         f"⚡ **صد متر آخر!!**\n\n"
-        f"{_rally_bar(7)} {uname(lead)}\n{_rally_bar(6)} {uname(chase)}\n\n"
-        f"🎙️ {ev2}\n🔥 {uname(lead)} دوباره اومد جلو! خط پایان نزدیکه!")
+        f"{stage_board(final_order, [7 - min(i, 3) for i in range(len(final_order))])}\n\n"
+        f"🎙️ {ev2}\n🔥 {uname(final_order[0])} اومد جلو! خط پایان نزدیکه!")
     await asyncio.sleep(2.5)
     
+    pot = bet * len(players)
     # 🏆 نتیجه نهایی
     if winner is None:
-        add_coins(p1, bet, league=False)
-        add_coins(p2, bet, league=False)
-        set_setting(f"rally_streak_{p1}", "0")
-        set_setting(f"rally_streak_{p2}", "0")
-        body = (f"🏁 **فوتوفینیش!!** 📸\n\n"
-                f"{_rally_bar(8)} {uname(p1)}\n{_rally_bar(8)} {uname(p2)}\n\n"
-                f"🤝 **دقیقاً با هم رسیدن! مساوی!**\n💰 شرط هر دو برگشت داده شد.")
+        for p in players:
+            add_coins(p, bet, league=False)
+            set_setting(f"rally_streak_{p}", "0")
+        body = (f"🏁 **فوتوفینیش!!** 📸\n\n" +
+                "\n".join(f"{_rally_bar(8)} {uname(p)}" for p in players) +
+                "\n\n🤝 **دقیقاً با هم رسیدن! مساوی!**\n💰 شرط هر دو برگشت داده شد.")
     else:
-        loser = p2 if winner == p1 else p1
-        weff, leff = (eff1, eff2) if winner == p1 else (eff2, eff1)
-        add_coins(winner, bet * 2, league=False)
         record_win(winner)
-        record_loss(loser, bet)
+        add_coins(winner, pot, league=False)
         rally_record(winner, True)
-        rally_record(loser, False)
-        # 🔥 استریک
+        for p in players:
+            if p != winner:
+                record_loss(p, bet)
+                rally_record(p, False)
+                set_setting(f"rally_streak_{p}", "0")
         streak = int(get_setting(f"rally_streak_{winner}", "0") or 0) + 1
         set_setting(f"rally_streak_{winner}", str(streak))
-        set_setting(f"rally_streak_{loser}", "0")
         title = rally_streak_title(streak)
         title_line = f"\n{title.split()[0]} {uname(winner)} لقب **«{title}»** گرفت! ({streak} برد پشت هم)" if title else ""
         
-        if weff < leff:
+        max_eff = max(effs.values())
+        if effs[winner] < max_eff * 0.99:
             story = f"😱😱 **شگفتی بزرگ پیست!!** {uname(winner)} با قدرت کمتر ترکوند!"
-        elif det1["fatigue"] or det2["fatigue"]:
-            story = f"🏆 {uname(winner)} برد — خستگی حریف کار دستش داد!"
         else:
             story = f"🏆 **{uname(winner)}** با اقتدار خط پایان رو رد کرد!"
         
-        body = (f"🏁 **پایان مسابقه!**\n\n"
-                f"{_rally_bar(8)} {uname(winner)} 🏆\n{_rally_bar(6)} {uname(loser)}\n\n"
+        medals = ["🏆", "🥈", "🥉", "4️⃣", "5️⃣"]
+        lines_r = "\n".join(f"{_rally_bar(8 - min(i, 3))} {uname(p)} {medals[i]}" for i, p in enumerate(ranking))
+        body = (f"🏁 **پایان مسابقه!**\n\n{lines_r}\n\n"
                 f"🎙️ {story}\n"
-                f"💰 جایزه: **{bet*2:,}** {CURRENCY_NAME}{title_line}")
+                f"💰 جایزه: **{pot:,}** {CURRENCY_NAME}{title_line}")
     
-    # 🔄 دکمه انتقام
+    # 🔄 دکمه انتقام فقط ۲ نفره
     kb = None
-    if winner is not None and not global_match and len(msgs) == 1:
-        loser = p2 if winner == p1 else p1
+    if winner is not None and len(players) == 2 and len(msgs) == 1:
+        loser = players[1] if winner == players[0] else players[0]
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("🔄 انتقام! (همون شرط)", callback_data=f"rally_rm_{loser}_{winner}_{bet}")]])
     await update_all(body, kb)
 
 async def rally_room_begin(room, context):
-    """🏇 شروع رالی از اتاق (مثل بقیه بازی‌ها — با دکمه ورود و شروع)"""
-    p1, p2 = room.players[0], room.players[1]
-    # 🚫 خر بات رالی نمی‌ده (نباید پیش بیاد چون دکمه‌ش حذفه — محض احتیاط)
-    if BOT_ID in room.players:
+    """🏇 شروع رالی از اتاق (۲ تا ۵ نفر — با دکمه ورود و شروع)"""
+    players = [p for p in room.players if p != BOT_ID]
+    if len(players) < 2:
         refund_room(room)
         room.finished = True
         cleanup_room(room.room_id)
-        await edit_room_msg(room, context, "❌🤖 خر بات رالی نمی‌ده! شرط‌ها برگشت داده شد.", result_keyboard())
+        await edit_room_msg(room, context, "❌ رالی حداقل ۲ پلیر واقعی می‌خواد! شرط‌ها برگشت داده شد.", result_keyboard())
         return
     room.finished = True  # مدیریت پیام دست rally_run میفته
     cleanup_room(room.room_id)
-    await edit_room_msg(room, context, "🏇 مسابقه شروع شد! 🏁💨")
-    await rally_run(context, p1, p2, room.bet, [room.chat_id])
+    await edit_room_msg(room, context, f"🏇 مسابقه {len(players)} نفره شروع شد! 🏁💨")
+    await rally_run(context, players, room.bet, [room.chat_id])
 
 # ============================================================
 # 5.6.5 🍾 عرق‌خوری دو نفره (فقط پلیرها)
@@ -2485,7 +2602,7 @@ def collect_wealth_tax(user_id):
         u = get_user(user_id)
         if not u: return 0
         wealth = (u["coins"] or 0) + (u["bank_balance"] or 0)
-        if wealth <= WEALTH_TAX_THRESHOLD:
+        if wealth <= econ_get("tax_t1", ECON_DEFAULTS["tax_t1"]):
             return 0
         last = int(get_setting(f"tax_{user_id}", "0") or 0)
         now = int(time.time())
@@ -2494,7 +2611,14 @@ def collect_wealth_tax(user_id):
             return 0
         if now - last < 86400:
             return 0
-        tax = int((wealth - WEALTH_TAX_THRESHOLD) * WEALTH_TAX_RATE)
+        # 💸 مالیات پله‌ای: عادی + مالیات سنگین نهنگ‌ها (قابل تنظیم از پنل)
+        t1 = econ_get("tax_t1", ECON_DEFAULTS["tax_t1"])
+        r1 = econ_get_f("tax_r1", ECON_DEFAULTS["tax_r1"]) / 100
+        t2 = econ_get("tax_t2", ECON_DEFAULTS["tax_t2"])
+        r2 = econ_get_f("tax_r2", ECON_DEFAULTS["tax_r2"]) / 100
+        tax = int((min(wealth, t2) - t1) * r1)
+        if wealth > t2:
+            tax += int((wealth - t2) * r2)
         if tax <= 0:
             set_setting(f"tax_{user_id}", str(now))
             return 0
@@ -3159,11 +3283,11 @@ GAME_MAX_PLAYERS = {
     "guessnum": 10,
     "mines": 5,
     "basketball": 10,
-    "rally": 2
+    "rally": 5
 }
 
 # بازی‌هایی که دقیقاً ۲ نفره هستند
-TWO_PLAYER_GAMES = {"rps", "ttt", "coinflip", "penalty", "rally"}
+TWO_PLAYER_GAMES = {"rps", "ttt", "coinflip", "penalty"}
 
 # اسم فارسی بازی‌ها برای دستور متنی (مثلاً: انفجار 100)
 GAME_ALIASES = {
@@ -3556,9 +3680,10 @@ def sec_crime_text(user_id):
         "💨 **تریاک** — نئشه شی درآمدت ×۲... ولی ۵ بست بکشی معتاد می‌شی! (۵هزار)\n"
         "🍾 **عرق‌خوری** — با رفیقت بزن، جفتتون جایزه بگیرین! (هر ۴ ساعت)\n"
         "🏥 **کمپ ترک** — معتاد شدی؟ ۲۵هزار + ۲۴ ساعت قفل = پاکی!\n"
+        "⚖️ **وثیقه** — رفیقت زندانه؟ ریپلای + `وثیقه` = آزادش کن! (۲۰هزار/ساعت — خودت نمی‌تونی برای خودت!)\n"
         "🛡️ طرف بیمه یا طلسم داشته باشه، دزدی سخته!\n\n"
         "💬 **دستور متنی:**\n"
-        "🦹 ریپلی + `دزدی` | `دزدی بانک` | `تریاک` | ریپلی + `عرق` | `کمپ`\n\n"
+        "🦹 ریپلی + `دزدی` | `دزدی بانک` | `تریاک` | ریپلی + `عرق` | `کمپ` | `وثیقه`\n\n"
         "👇 دل و جرأت داری؟"
     )
 
@@ -3655,7 +3780,7 @@ GAME_TUTORIALS = {
     "coinflip": "🪙 آموزش شیر یا خط:\nهر کی زودتر دکمه بزنه طرفش رو انتخاب می‌کنه!\n🎲 ربات تاس می‌ندازه: زوج = شیر 🦁 | فرد = خط 🌛",
     "hilo": "🔼🔽 آموزش بالا/پایین:\nربات دو تاس واقعی می‌ندازه — حدس بزن مجموع چنده:\n🔼 بالای ۷ = ×۲ | 🎯 دقیقاً ۷ = ×۵ | 🔽 زیر ۷ = ×۲",
     "guessnum": "🔢 آموزش حدس عدد:\nعدد مخفی بین ۱ تا ۱۰۰ — نوبتی تایپ کن!\nربات می‌گه بالاتر🔼 یا پایین‌تر🔽. درست گفتی؟ همه رو بردی! 🏆",
-    "rally": "🏇 آموزش رالی:\n۲ نفره — قدرت خرت (وسیله‌های فروشگاه) شانس بردت رو تعیین می‌کنه!\nپیست شانسی + فرم روز + استریک — قوی‌تر تا ۸۸٪ می‌بره ولی شگفتی همیشه هست! 😏\n🚫 خر بات بازی نمی‌کنه — فقط پلیر!",
+    "rally": "🏇 آموزش رالی:\n۲ تا ۵ نفره — قدرت خرت (وسیله‌های فروشگاه) شانس بردت رو تعیین می‌کنه!\nپیست شانسی + فرم روز + استریک — قوی‌تر تا ۸۸٪ می‌بره ولی شگفتی همیشه هست! 😏\n🚫 خر بات بازی نمی‌کنه — فقط پلیر!",
     "mines": "💣 آموزش مین‌روب:\n۲ نفره: ۹ جعبه | ۳-۵ نفره: ۱۶ جعبه — یکیش بمبه!\nنوبتی جعبه باز کن. بمب = حذف! ☠️ آخرین بازمانده می‌بره!",
 }
 
@@ -5915,18 +6040,15 @@ def crash_status_text(room):
     return "\n".join(lines)
 
 async def crash_begin(room, context):
-    # نقطه انفجار: بین ۱ تا ~۱۲
-    r = random.random()
-    if r < 0.05:
-        cp = 1.0  # انفجار فوری
-    else:
-        cp = min(12.0, round(0.9 / max(0.075, random.random()), 2))
-        cp = max(1.1, cp)
+    # نقطه انفجار: توزیع استاندارد crash با سود خونه ~۱۰٪ — سقف x5 که میلیاردر نسازه!
+    cp = round(min(5.0, 0.90 / max(0.18, random.random())), 2)
+    if cp < 1.1:
+        cp = 1.0  # 💥 انفجار فوری (~۱۸٪)
     
     room.game_data = {"crash_point": cp, "mult": 1.0, "cashed": {}}
     # 🤖 خر بات یه هدف مخفی برای برداشت داره
     if BOT_ID in room.players:
-        room.game_data["bot_target"] = round(random.uniform(1.3, 3.5), 2)
+        room.game_data["bot_target"] = round(random.uniform(1.2, 2.2), 2)
     await edit_room_msg(room, context,
         f"💥 **انفجار**\n━━━━━━━━━━━━━━\n🚀 موشک داره بلند می‌شه...\n📈 ضریب: **x1.00**\n\n⚠️ قبل از انفجار برداشت کن!",
         crash_keyboard(room))
@@ -6227,19 +6349,15 @@ async def _slot_play(update, context, bet):
     line = " | ".join(reels)
     
     if reels[0] == reels[1] == reels[2]:
-        # سه‌تایی!
-        if reels[0] == "7️⃣": mult = 20
-        elif reels[0] == "🍇": mult = 10
-        else: mult = 6
-        prize = bet * mult
+        # 🎰 سه‌تایی = ×۳
+        prize = bet * 3
         add_coins(user.id, prize, league=False)
         record_win(user.id)
-        result = f"🎰 **جکپات!** سه‌تایی {reels[0]}\n💰 بردی: **+{prize:,}** {CURRENCY_NAME} (x{mult})"
+        result = f"🎰 **جکپات!** سه‌تایی {reels[0]}\n💰 بردی: **+{prize:,}** {CURRENCY_NAME} (x3)"
     elif reels[0] == reels[1] or reels[1] == reels[2] or reels[0] == reels[2]:
-        prize = bet * 2
-        add_coins(user.id, prize, league=False)
-        record_win(user.id)
-        result = f"✨ دوتایی! 💰 بردی: **+{prize:,}** {CURRENCY_NAME} (x2)"
+        # ✌️ دوتایی = مساوی، شرط برمی‌گرده
+        add_coins(user.id, bet, league=False)
+        result = f"🤝 دوتایی! مساوی شد — شرطت برگشت: **{bet:,}** {CURRENCY_NAME}"
     else:
         ref = record_loss(user.id, bet)
         result = f"💀 باختی! **-{bet:,}** {CURRENCY_NAME}"
@@ -6394,7 +6512,10 @@ def panel_sections(data):
             "💬 **دستور متنی:**\n"
             "➕➖ ریپلی + `+سکه 1000` | بدون ریپلی: `+سکه 1000 آیدی/@اسم`\n"
             "🎁 ریپلی + `کادو گل` | از راه دور: `کادو گل 123456`\n"
-            "🎊 `سکه‌همگانی 500` | 🔄 `ریست هفتگی`\n\n"
+            "🎊 `سکه‌همگانی 500` | 🔄 `ریست هفتگی`\n"
+            "⚙️ `تنظیم اقتصاد` — نرخ سود بانک و مالیات پله‌ای\n"
+            "🐋 `بازتنظیم اقتصاد` — فشرده‌سازی ثروت نهنگ‌ها\n"
+            "🏪 `ریست شاپ` — پاک‌کردن همه وسایل\n\n"
             "👇 آموزش کامل هر کدوم:",
             panel_sec_kb(
                 [InlineKeyboardButton("💰 آموزش مدیریت سکه", callback_data="panel_cmd_coins"),
@@ -6952,7 +7073,7 @@ HELP_SECTIONS = {
         "🔢 `حدس‌عدد 500` — عدد مخفی ۱-۱۰۰، نوبتی حدس بزن! (تا ۱۰ نفر)\n"
         "💣 `مین 500` — جعبه بمب‌دار رو باز نکن! حذفی (تا ۵ نفر — ۳ نفر به بالا ۱۶ جعبه!)\n\n"
         "🎰 **بازی فوری تکی:**\n"
-        "`اسلات 500` — انیمیشن واقعی! سه‌تایی 7️⃣ = x20 جکپات!\n\n"
+        "`اسلات 500` — انیمیشن واقعی! سه‌تایی = x3 | دوتایی = مساوی!\n\n"
         "💡 بازی‌های ۲ نفره با ورود نفر دوم خودکار شروع می‌شن.\n"
         "💡 می‌تونی فقط اسم بازی رو بنویسی (مثلاً `انفجار`) تا ربات مبلغ شرط رو ازت بپرسه.\n"
         "⏰ اگه بازی تا ۵ دقیقه شروع نشه، خودکار لغو می‌شه و شرط‌ها برمی‌گرده.\n"
@@ -7140,7 +7261,8 @@ FJ_KNOWN_CMDS = {
     "دزدی بانک", "دزدی از بانک", "سرقت بانک", "سرقت از بانک", "خرید جفت‌گیری", "خرید جفتگیری", "خرید جفت گیری",
     "سود", "سود بانک", "برداشت سود", "تسویه وام", "تسویه‌وام", "تسویه",
     "کمپ", "کمپ ترک", "ترک اعتیاد", "camp", "عرق", "عرق‌خوری", "عرق خوری", "مشروب",
-    "رالی", "rally", "مسابقه", "فروش", "فروش وسایل", "فروش وسیله", "sell"
+    "رالی", "rally", "مسابقه", "فروش", "فروش وسایل", "فروش وسیله", "sell",
+    "وثیقه", "آزادی", "bail", "تنظیم اقتصاد", "اقتصاد", "بازتنظیم اقتصاد", "ریست شاپ", "ریست فروشگاه"
 }
 FJ_FIRST_WORD_CMDS = {"اسلات", "slot", "انتقال", "transfer", "هدیه", "ارتقا", "اسم", "خرجان", "خردانا", "واریز", "برداشت", "deposit", "withdraw", "وام", "loan"}
 
@@ -7225,14 +7347,19 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("🚫 شما بن شده‌اید!")
         return
     
-    # ⛓️ بازداشت؟ هیچ دستوری کار نمی‌کنه (فقط به دستورات ربات جواب بده، نه چت عادی)
+    # ⛓️ بازداشت؟ هیچ دستوری کار نمی‌کنه — جز «وثیقه»!
     jail_left = is_jailed(user.id)
     if jail_left > 0:
+        # ⚖️ وثیقه تنها راه نجات
+        if text in ["وثیقه", "آزادی", "bail"]:
+            await bail_command(update, context)
+            return
         if looks_like_bot_command(update, context, text):
             await update.message.reply_text(
                 f"🚔⛓️ **تو بازداشتی!**\n"
                 f"⏳ {jail_left // 60} دقیقه و {jail_left % 60} ثانیه دیگه آزاد می‌شی.\n"
-                f"😏 تا اون موقع هیچ کاری نمی‌تونی بکنی!")
+                f"⚖️ عجله داری؟ بنویس `وثیقه` — ولی فقط یه **رفیق** می‌تونه برات بذاره! ({BAIL_PER_HOUR:,}/ساعت)",
+                parse_mode="Markdown")
         return
     
     # 🏥 توی کمپ ترک؟ همه‌چیز قفل! (پایان دوره خودکار چک می‌شه)
@@ -7541,6 +7668,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ===== 🏥 کمپ ترک اعتیاد =====
     if text in ["کمپ", "کمپ ترک", "ترک اعتیاد", "camp"]:
         await camp_command(update, context)
+        return
+    
+    # ===== ⚖️ وثیقه (وقتی آزاده — تو بازداشت بالاتر هندل می‌شه) =====
+    if text in ["وثیقه", "آزادی", "bail"]:
+        await bail_command(update, context)
         return
     
     # ===== 🏇 منوی رالی (بدون عدد — با عدد میره تو GAME_ALIASES مثل بقیه بازی‌ها) =====
@@ -7914,6 +8046,86 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"🔥 **{amt:,}** از {esc_md(t_name)} (آیدی `{t_id}`) کسر شد!\n💳 موجودیش: {u_t['coins']:,}", parse_mode="Markdown")
                     return
     
+    # ⚙️ تنظیم اقتصاد (اونر): نمایش و تغییر پارامترها
+    if user.id == OWNER_ID and text in ["تنظیم اقتصاد", "اقتصاد", "econ"]:
+        lines = ["⚙️ **پارامترهای اقتصاد** (قابل تغییر)", "━━━━━━━━━━━━━━",
+                 f"💹 بانک: سود ثابت {int(BANK_INTEREST*100)}٪ (دست‌نخورده به درخواست اونر)", "",
+                 "💸 **مالیات ثروت پله‌ای:**"]
+        lines.append(f"`tax_t1` = {econ_get('tax_t1', ECON_DEFAULTS['tax_t1']):,} (شروع مالیات)")
+        lines.append(f"`tax_r1` = {econ_get_f('tax_r1', ECON_DEFAULTS['tax_r1']):g}٪ (نرخ عادی)")
+        lines.append(f"`tax_t2` = {econ_get('tax_t2', ECON_DEFAULTS['tax_t2']):,} (شروع مالیات سنگین)")
+        lines.append(f"`tax_r2` = {econ_get_f('tax_r2', ECON_DEFAULTS['tax_r2']):g}٪ (نرخ نهنگ‌ها)")
+        lines.append("\n💬 **تغییر:** `تنظیم اقتصاد tax_r2 8`")
+        lines.append("🔄 **برگشت به پیش‌فرض:** `تنظیم اقتصاد ریست`")
+        lines.append("\n🛠️ **ابزارهای دیگه:**")
+        lines.append("`بازتنظیم اقتصاد` — فشرده‌سازی ثروت نهنگ‌ها (لگاریتمی)")
+        lines.append("`ریست شاپ` — پاک‌کردن همه وسایل خریداری‌شده")
+        await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+        return
+    
+    parts_ec = text.split()
+    if user.id == OWNER_ID and len(parts_ec) >= 2 and parts_ec[0] == "تنظیم" and parts_ec[1] == "اقتصاد" and len(parts_ec) >= 3:
+        if parts_ec[2] in ["ریست", "پیشفرض", "پیش‌فرض"]:
+            for k in ECON_DEFAULTS:
+                set_setting(f"econ_{k}", "")
+            await update.message.reply_text("🔄 همه پارامترهای اقتصاد به پیش‌فرض برگشتن!")
+            return
+        if len(parts_ec) >= 4 and parts_ec[2] in ECON_DEFAULTS:
+            val = parts_ec[3].translate(FA_DIGITS).replace("٪", "").replace("%", "")
+            try:
+                fval = float(val)
+            except ValueError:
+                await update.message.reply_text("❌ عدد معتبر بده! مثال: `تنظیم اقتصاد bank_r1 15`", parse_mode="Markdown")
+                return
+            set_setting(f"econ_{parts_ec[2]}", str(fval))
+            await update.message.reply_text(f"✅ `{parts_ec[2]}` شد **{fval:g}** — همین الان فعاله!", parse_mode="Markdown")
+            return
+        await update.message.reply_text("❌ پارامتر ناشناخته! بنویس `تنظیم اقتصاد` تا لیست رو ببینی.", parse_mode="Markdown")
+        return
+    
+    # 🐋 بازتنظیم اقتصاد (اونر): فشرده‌سازی لگاریتمی ثروت نهنگ‌ها
+    if user.id == OWNER_ID and text in ["بازتنظیم اقتصاد", "بازتنظیم ثروت", "فشرده سازی"]:
+        cap = econ_get("tax_t2", ECON_DEFAULTS["tax_t2"])  # آستانه: همون مالیات سنگین (پیش‌فرض ۵ میلیون)
+        with closing(db_connect()) as db:
+            whales = db.execute(
+                "SELECT user_id, name, coins + COALESCE(bank_balance,0) AS w FROM users "
+                "WHERE coins + COALESCE(bank_balance,0) > ? ORDER BY w DESC", (cap,)).fetchall()
+        if not whales:
+            await update.message.reply_text(f"😊 هیچ‌کس بالای {cap:,} نیست — اقتصاد سالمه!")
+            return
+        import math
+        preview = []
+        for w in whales[:10]:
+            new_w = cap + int(1000000 * math.log10(max((w["w"] - cap) / 1000000, 1) + 1))
+            preview.append(f"• {esc_md(w['name'])}: {w['w']:,} → **{new_w:,}**")
+        await update.message.reply_text(
+            f"🐋 **بازتنظیم ثروت نهنگ‌ها**\n━━━━━━━━━━━━━━\n"
+            f"👥 {len(whales)} نفر بالای {cap:,} هستن.\n"
+            f"📐 فرمول: {cap:,} + ۱M × log₁₀(مازاد/M + 1)\n\n"
+            f"**پیش‌نمایش:**\n" + "\n".join(preview) +
+            f"\n\n⚠️ ترتیب جدول حفظ می‌شه ولی فاصله‌ها منطقی می‌شه. برگشت‌ناپذیره (بکاپ خودکار قبلش می‌گیرم)!",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🐋 آره، بازتنظیم کن!", callback_data="panel_squash_yes"),
+                InlineKeyboardButton("❌ بیخیال", callback_data="panel_squash_no")]]),
+            parse_mode="Markdown")
+        return
+    
+    # 🏪 ریست شاپ (اونر): پاک‌کردن همه وسایل + برهنه‌کردن خرها
+    if user.id == OWNER_ID and text in ["ریست شاپ", "ریست فروشگاه"]:
+        with closing(db_connect()) as db:
+            cnt = db.execute("SELECT COUNT(*) c FROM donkeys WHERE items != '[]' AND items IS NOT NULL").fetchone()["c"]
+        await update.message.reply_text(
+            f"🏪 **ریست کامل فروشگاه**\n━━━━━━━━━━━━━━\n"
+            f"👥 {cnt} نفر وسیله دارن.\n"
+            f"🗑️ **همه وسایل همه پاک می‌شه** (پوشیده + انبار) — بدون برگشت پول!\n"
+            f"⚡ قدرت خر همه صفر می‌شه، باف‌ها می‌پره.\n\n"
+            f"⚠️ برگشت‌ناپذیره (بکاپ خودکار قبلش می‌گیرم)! مطمئنی؟",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🗑️ آره، همه رو پاک کن!", callback_data="panel_shopreset_yes"),
+                InlineKeyboardButton("❌ بیخیال", callback_data="panel_shopreset_no")]]),
+            parse_mode="Markdown")
+        return
+    
     # 🔄 ریست جدول هفتگی (اونر)
     if user.id == OWNER_ID and text in ["ریست هفتگی", "ریست جدول هفتگی", "ریست لیگ"]:
         await update.message.reply_text(
@@ -8141,7 +8353,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_reply_markup(reply_markup=None)  # دکمه برداشته شه (دابل کلیک نشه)
         except Exception:
             pass
-        await rally_run(context, loser_id, winner_id, rbet, [query.message.chat_id])
+        await rally_run(context, [loser_id, winner_id], rbet, [query.message.chat_id])
         return
     
     # ===== 📖 آموزش بازی (برای همه آزاد — پاپ‌آپ شخصی) =====
@@ -8241,6 +8453,79 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.edit_message_text(sec[0], reply_markup=sec[1], parse_mode="Markdown")
             except Exception:
                 pass  # «بروزرسانی» با متن یکسان → Message is not modified
+            return
+        
+        # 🐋 بازتنظیم ثروت نهنگ‌ها
+        if data == "panel_squash_yes":
+            import math, io
+            # 💾 بکاپ خودکار قبل از عملیات
+            try:
+                bdata = export_db_json()
+                payload = json.dumps(bdata, ensure_ascii=False).encode("utf-8")
+                f = io.BytesIO(payload)
+                f.name = f"backup_before_squash_{int(time.time())}.json"
+                await context.bot.send_document(chat_id=query.message.chat_id, document=f,
+                    caption="💾 بکاپ خودکار قبل از بازتنظیم ثروت — نگهش دار!")
+            except Exception as e:
+                logger.warning(f"⚠️ بکاپ قبل squash نشد: {e}")
+            cap = econ_get("tax_t2", ECON_DEFAULTS["tax_t2"])
+            n_fixed, total_burned = 0, 0
+            with closing(db_connect()) as db:
+                whales = db.execute(
+                    "SELECT user_id, coins, COALESCE(bank_balance,0) AS bank FROM users "
+                    "WHERE coins + COALESCE(bank_balance,0) > ?", (cap,)).fetchall()
+                for w in whales:
+                    old_w = w["coins"] + w["bank"]
+                    new_w = cap + int(1000000 * math.log10(max((old_w - cap) / 1000000, 1) + 1))
+                    # نسبت جیب/بانک حفظ شه
+                    ratio = w["coins"] / old_w if old_w > 0 else 1
+                    new_coins = int(new_w * ratio)
+                    new_bank = new_w - new_coins
+                    db.execute("UPDATE users SET coins = ?, bank_balance = ? WHERE user_id = ?",
+                              (new_coins, new_bank, w["user_id"]))
+                    n_fixed += 1
+                    total_burned += old_w - new_w
+                db.commit()
+            for w in whales:
+                update_level(w["user_id"])
+            await query.edit_message_text(
+                f"🐋✅ **بازتنظیم انجام شد!**\n━━━━━━━━━━━━━━\n"
+                f"👥 {n_fixed} نهنگ فشرده شدن\n"
+                f"🔥 {total_burned:,} {CURRENCY_NAME} از اقتصاد سوزونده شد!\n"
+                f"📊 جدول الان منطقیه — بنویس `جدول` ببین!",
+                parse_mode="Markdown")
+            return
+        if data == "panel_squash_no":
+            await query.edit_message_text("❌ بازتنظیم لغو شد — نهنگ‌ها نفس راحت کشیدن! 🐋😅")
+            return
+        
+        # 🏪 ریست کامل فروشگاه
+        if data == "panel_shopreset_yes":
+            import io
+            try:
+                bdata = export_db_json()
+                payload = json.dumps(bdata, ensure_ascii=False).encode("utf-8")
+                f = io.BytesIO(payload)
+                f.name = f"backup_before_shopreset_{int(time.time())}.json"
+                await context.bot.send_document(chat_id=query.message.chat_id, document=f,
+                    caption="💾 بکاپ خودکار قبل از ریست فروشگاه — نگهش دار!")
+            except Exception as e:
+                logger.warning(f"⚠️ بکاپ قبل shopreset نشد: {e}")
+            with closing(db_connect()) as db:
+                cnt = db.execute("SELECT COUNT(*) c FROM donkeys WHERE items != '[]' AND items IS NOT NULL").fetchone()["c"]
+                db.execute("UPDATE donkeys SET equipped_hat='', equipped_saddle='', equipped_horseshoe='', "
+                          "equipped_tie='', equipped_clothes='', equipped_accessory='', "
+                          "equipped_talisman='', equipped_magic='', items='[]'")
+                db.commit()
+            await query.edit_message_text(
+                f"🏪✅ **فروشگاه ریست شد!**\n━━━━━━━━━━━━━━\n"
+                f"🗑️ وسایل {cnt} نفر پاک شد — همه خرها لخت شدن! 🐴\n"
+                f"⚡ قدرت و باف همه صفر شد.\n"
+                f"💡 حالا همه باید از اول با قیمت‌های جدید خرید کنن!",
+                parse_mode="Markdown")
+            return
+        if data == "panel_shopreset_no":
+            await query.edit_message_text("❌ ریست فروشگاه لغو شد.")
             return
         
         # 🔄 ریست جدول هفتگی
@@ -8397,9 +8682,9 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🎰 **اسلات خرستان**\n━━━━━━━━━━━━━━\n"
             "🎡 انیمیشن واقعی تلگرام می‌چرخه — نتیجه همونیه که می‌بینی!\n"
-            "7️⃣7️⃣7️⃣ = جایزه **x20**! 💥\n"
-            "🍇🍇🍇 = x10 | سه‌تایی دیگه = x6\n"
-            "✌️ دوتایی = x2\n\n"
+            "🎰 سه‌تایی (هر نمادی) = جایزه **x3**! 💥\n"
+            "🤝 دوتایی = مساوی، شرط برمی‌گرده\n"
+            "💀 قاطی = شرط می‌سوزه\n\n"
             f"💬 برای بازی بنویس: `اسلات 500`\n"
             f"(حداقل {MIN_BET})",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 بازی‌ها", callback_data="games_list")]]),
@@ -8641,6 +8926,44 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🏆 جدول کلی", callback_data="lb_total"),
                                                 InlineKeyboardButton("🏠 منو", callback_data="home")]]),
             parse_mode="Markdown")
+        return
+    
+    # ===== ⚖️ وثیقه (فقط برای رفیق — bail_pay_{آیدی زندانی}) =====
+    if data.startswith("bail_pay_"):
+        try:
+            prisoner_id = int(data[9:])
+        except ValueError:
+            return
+        if prisoner_id == user.id:
+            await query.answer("🚫 خودت نمی‌تونی وثیقه خودت رو بذاری!", show_alert=True)
+            return
+        left = is_jailed(prisoner_id)
+        if left <= 0:
+            await query.answer("😊 آزاد شده — پولت سرجاشه!", show_alert=True)
+            try:
+                await query.edit_message_text("😊 زندانی قبلاً آزاد شده بود — پولی کم نشد!")
+            except Exception:
+                pass
+            return
+        amt = bail_amount(prisoner_id)
+        if not remove_coins(user.id, amt):
+            u_b = get_user(user.id)
+            await query.answer(f"❌ {amt:,} لازمه! داری: {u_b['coins']:,}", show_alert=True)
+            return
+        set_setting(f"jail_{prisoner_id}", "0")
+        await query.answer("🕊️ آزادش کردی!")
+        await query.edit_message_text(
+            f"🕊️ **{uname(prisoner_id)} آزاد شد!**\n━━━━━━━━━━━━━━\n"
+            f"🤝 {esc_md(user.first_name)} وثیقه‌ش رو گذاشت: **-{amt:,}** {CURRENCY_NAME}\n"
+            f"⚖️ قاضی طویله پرونده رو بست!\n"
+            f"😍 این یعنی رفاقت! یادت باشه جبران کنی {uname(prisoner_id)}!",
+            parse_mode="Markdown")
+        return
+    
+    if data == "bail_no":
+        await query.edit_message_text(
+            "⛓️ باشه، بمون آب خنکت رو بخور! 😂\n"
+            "⚖️ نظرت عوض شد بنویس: `وثیقه`", parse_mode="Markdown")
         return
     
     # ===== 💨 تریاک =====
