@@ -241,7 +241,16 @@ def uname(user_id):
     if user_id == BOT_ID:
         return BOT_NAME
     u = get_user(user_id)
-    return esc_md(u["name"]) if u else "ناشناس"
+    if not u:
+        return "ناشناس"
+    # 👑 قهرمان هفته؟ تاج کوچیک کنار اسمش (تو بازی‌ها خلوت بمونه)
+    try:
+        wt = get_weekly_title(user_id)
+        if wt:
+            return f"{wt.split(' ')[0]}{esc_md(u['name'])}"
+    except Exception:
+        pass
+    return esc_md(u["name"])
 
 def add_coins(user_id, amount, league=True):
     """league=False برای انتقال/کادو — که تقلب لیگ نشه"""
@@ -359,8 +368,12 @@ def profile_text(user_id):
     total_games = (u["wins"] or 0) + (u["losses"] or 0)
     winrate = f"{u['wins']*100//total_games}٪" if total_games else "—"
     
+    # 👑 لقب قهرمانی هفته (اگه داره)
+    wt = get_weekly_title(user_id)
+    wt_line = f"{wt}\n" if wt else ""
     msg = (
         f"👤 **{esc_md(u['name'])}**\n"
+        f"{wt_line}"
         f"{title}\n"
         f"━━━━━━━━━━━━━━\n"
         f"🆔 `{u['user_id']}`\n"
@@ -391,6 +404,11 @@ def profile_text(user_id):
         pass
     if badges:
         msg += f"━━━━━━━━━━━━━━\n📌 " + "  •  ".join(badges) + "\n"
+    
+    # 🏅 دستاوردهای دائمی ابَرخری (قهرمانی‌های هفتگی)
+    ach_line = achievements_line(user_id)
+    if ach_line:
+        msg += f"━━━━━━━━━━━━━━\n{ach_line}\n"
     
     if equipped_parts:
         msg += f"━━━━━━━━━━━━━━\n🎽 **تیپ خر:**  " + " ".join(p.split(" ")[0] for p in equipped_parts) + "\n"
@@ -1637,7 +1655,7 @@ def league_text(user_id=None):
     else:
         for i, r in enumerate(rows, 1):
             medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f" {i}."
-            lines.append(f"{medal}  {esc_md(r['name'])}  ⚡ **{r['earned']:,}**")
+            lines.append(f"{medal}  {titled_name(r['user_id'], r['name'])}  ⚡ **{r['earned']:,}**")
     if user_id:
         with closing(db_connect()) as db:
             me = db.execute("SELECT earned FROM league WHERE user_id = ?", (user_id,)).fetchone()
@@ -1670,23 +1688,95 @@ def total_leaderboard_text(user_id):
     for i, row in enumerate(rows, 1):
         medal = ["🥇", "🥈", "🥉"][i-1] if i <= 3 else f" {i}."
         title = get_title_by_level(row["level"]).split(" ")[0]  # فقط ایموجی لقب
-        msg += f"{medal}  {title} {esc_md(row['name'])}  💎 **{row['wealth']:,}**\n"
+        # 👑 قهرمان هفته؟ لقب افتخاریش جای اسم ساده میاد!
+        msg += f"{medal}  {title} {titled_name(row['user_id'], row['name'])}  💎 **{row['wealth']:,}**\n"
     if user_row and user_row["rank"]:
         msg += f"━━━━━━━━━━━━━━\n👤 رتبه تو: **#{user_row['rank']}**"
     return msg
 
+# 👑 لقب‌های افتخاری ۳ نفر اول هفته — تا پایان هفته بعد کنار اسمشون می‌درخشه!
+WEEKLY_TITLES = [
+    "🥇 ابَرخر طلایی",
+    "🥈 ابَرخر نقره‌ای",
+    "🥉 ابَرخر برنزی",
+]
+
+def get_weekly_title(user_id):
+    """👑 لقب قهرمانی هفته پیش (اگه داره) — خروجی: لقب یا None"""
+    try:
+        raw = get_setting("weekly_champs", "")
+        if not raw:
+            return None
+        champs = json.loads(raw)
+        for i, uid in enumerate(champs[:3]):
+            if uid == user_id:
+                return WEEKLY_TITLES[i]
+    except Exception:
+        pass
+    return None
+
+def add_achievement(user_id, rank_idx):
+    """🏅 ثبت دستاورد دائمی قهرمانی هفته (rank_idx: ۰=طلا ۱=نقره ۲=برنز)"""
+    try:
+        raw = get_setting(f"achievements_{user_id}", "[0,0,0]")
+        ach = json.loads(raw)
+        while len(ach) < 3:
+            ach.append(0)
+        ach[rank_idx] += 1
+        set_setting(f"achievements_{user_id}", json.dumps(ach))
+    except Exception as e:
+        logger.warning(f"⚠️ ثبت دستاورد نشد: {e}")
+
+def get_achievements(user_id):
+    """🏅 دستاوردهای دائمی: [تعداد طلا، نقره، برنز]"""
+    try:
+        ach = json.loads(get_setting(f"achievements_{user_id}", "[0,0,0]"))
+        while len(ach) < 3:
+            ach.append(0)
+        return ach[:3]
+    except Exception:
+        return [0, 0, 0]
+
+def achievements_line(user_id):
+    """🏅 خط دستاوردها برای پروفایل: «🏅 دستاوردها: 🥇×2 🥈×1» یا خالی"""
+    g, s, b = get_achievements(user_id)
+    if g + s + b == 0:
+        return ""
+    parts = []
+    if g: parts.append(f"🥇×{g}")
+    if s: parts.append(f"🥈×{s}")
+    if b: parts.append(f"🥉×{b}")
+    return "🏅 افتخارات ابَرخری: " + "  ".join(parts)
+
+def titled_name(user_id, name=None):
+    """اسم + لقب قهرمانی (اگه داره): «👑⚡ سلطان طویله | علی»"""
+    if name is None:
+        u = get_user(user_id)
+        name = u["name"] if u else "ناشناس"
+    wt = get_weekly_title(user_id)
+    if wt:
+        return f"{wt} | {esc_md(name)}"
+    return esc_md(name)
+
 async def league_settle(context):
-    """🏁 پایان هفته: پرداخت جوایز + اعلام در همه گروه‌ها + ریست"""
+    """🏁 پایان هفته: پرداخت جوایز + تاج‌گذاری لقب‌ها + اعلام + ریست"""
     rows = league_top(3)
     end = league_get_end()
     
-    # پرداخت جوایز
+    # پرداخت جوایز + 👑 ثبت لقب قهرمانان
     winner_lines = []
+    champs = []
     for i, r in enumerate(rows):
         prize = LEAGUE_PRIZES[i]
         add_coins(r["user_id"], prize, league=False)  # جایزه توی لیگ بعدی حساب نشه!
+        champs.append(r["user_id"])
+        add_achievement(r["user_id"], i)  # 🏅 دستاورد دائمی!
         medal = ["🥇", "🥈", "🥉"][i]
-        winner_lines.append(f"{medal} **{esc_md(r['name'])}** — {r['earned']:,} امتیاز → جایزه: **{prize:,}** {CURRENCY_NAME}")
+        winner_lines.append(
+            f"{medal} **{esc_md(r['name'])}** — {r['earned']:,} امتیاز → جایزه: **{prize:,}** {CURRENCY_NAME}\n"
+            f"      👑 لقب گرفت: **«{WEEKLY_TITLES[i]}»**")
+    # 👑 لقب‌ها تا آخر هفته بعد اعتبار دارن (هفته بعد قهرمانان جدید جایگزین می‌شن)
+    set_setting("weekly_champs", json.dumps(champs))
     
     # ریست لیگ + هفته جدید
     with closing(db_connect()) as db:
@@ -1701,14 +1791,40 @@ async def league_settle(context):
         logger.info("🏆 هفته لیگ بدون شرکت‌کننده تموم شد")
         return
     
-    # 📢 اعلام در همه گروه‌ها
+    # 📢 اعلام عمومی: فقط اسم و لقب — بدون هیچ اشاره‌ای به پول! 🤫
+    public_lines = []
+    for i, r in enumerate(rows):
+        medal = ["🥇", "🥈", "🥉"][i]
+        public_lines.append(f"{medal} **{esc_md(r['name'])}**\n      👑 لقب این هفته: **«{WEEKLY_TITLES[i]}»**")
     msg = ("🏆🎉 **پایان هفته جدول هفتگی خرستان!** 🎉🏆\n━━━━━━━━━━━━━━\n"
-           "👑 قهرمانان این هفته:\n\n" + "\n".join(winner_lines) +
-           "\n\n⚡ هفته جدید از همین الان شروع شد!\nبجنگید برای قهرمانی! 🐴🔥")
+           "👑 سه ابَرخر برتر این هفته:\n\n" + "\n".join(public_lines) +
+           "\n\n✨ این لقب‌ها تا آخر هفته کنار اسمشون می‌درخشه!\n"
+           "⚡ هفته جدید از همین الان شروع شد — بجنگید برای لقب ابَرخری! 🐴🔥")
+    
+    # 💌 پیام تبریک خصوصی به خود قهرمانان (جایزه فقط اینجا گفته می‌شه)
+    for i, r in enumerate(rows):
+        try:
+            await context.bot.send_message(
+                chat_id=r["user_id"],
+                text=(f"🎊 **تبریک قهرمان!** {['🥇','🥈','🥉'][i]}\n━━━━━━━━━━━━━━\n"
+                      f"این هفته با {r['earned']:,} امتیاز رتبه {i+1} جدول هفتگی شدی!\n"
+                      f"👑 لقب گرفتی: **«{WEEKLY_TITLES[i]}»**\n"
+                      f"💰 جایزه‌ت واریز شد: **{LEAGUE_PRIZES[i]:,}** {CURRENCY_NAME}\n\n"
+                      f"✨ یه هفته با این لقب بتاز! 🐴"),
+                parse_mode="Markdown")
+        except Exception:
+            pass  # پی‌وی بسته‌ست — مهم نیست
+        await asyncio.sleep(0.5)
+    
+    # 📤 ارسال به همه چت‌ها: گروه‌ها + پی‌وی همه پلیرها
+    sent_ids = set()
     try:
         with closing(db_connect()) as db:
-            chats = db.execute("SELECT chat_id FROM chats WHERE chat_type IN ('group','supergroup')").fetchall()
+            chats = db.execute("SELECT chat_id FROM chats").fetchall()
         for ch in chats:
+            if ch["chat_id"] in sent_ids:
+                continue
+            sent_ids.add(ch["chat_id"])
             try:
                 await context.bot.send_message(chat_id=ch["chat_id"], text=msg, parse_mode="Markdown")
             except Exception:
@@ -1716,7 +1832,15 @@ async def league_settle(context):
             await asyncio.sleep(0.5)
     except Exception as e:
         logger.error(f"❌ خطا در اعلام لیگ: {e}")
-    logger.info(f"🏆 لیگ هفتگی بسته شد — {len(rows)} برنده")
+    
+    # 📣 ارسال به کانال (اگه تنظیم شده — همون کانال جوین اجباری)
+    ch_target = get_setting("fj_channel", "")
+    if ch_target:
+        try:
+            await context.bot.send_message(chat_id=ch_target, text=msg, parse_mode="Markdown")
+        except Exception as e:
+            logger.warning(f"⚠️ اعلام به کانال {ch_target} نشد: {e}")
+    logger.info(f"🏆 لیگ هفتگی بسته شد — {len(rows)} برنده — اعلام به {len(sent_ids)} چت")
 
 # ============================================================
 # 5.5 🦹 دزدی از بانک
@@ -6039,11 +6163,25 @@ def crash_status_text(room):
     lines.append("\n⚠️ قبل از انفجار برداشت کن!")
     return "\n".join(lines)
 
+def crash_edge_for_bet(bet):
+    """💥 وسوسه‌انگیز برای شرط کم، دیوار برای شرط زیاد!
+    خروجی: (ضریب پایه توزیع، سقف ضریب)"""
+    if bet <= 2000:
+        return 0.97, 20.0   # 🟢 شرط تفریحی: تا x20!! رویای جکپات — خونه فقط ~۳٪
+    if bet <= 10000:
+        return 0.92, 10.0   # 🔵 هنوز وسوسه‌انگیز: تا x10 — سود خونه ~۸٪
+    if bet <= 50000:
+        return 0.80, 5.0    # 🟣 جدی: تا x5 — ~۲۰٪
+    if bet <= 200000:
+        return 0.65, 3.0    # 🟠 سنگین: سقف x3 — ~۳۵٪
+    return 0.50, 2.0        # 🔴 نجومی: سقف x2! — ~۵۰٪ — دیوار بتنی نهنگ‌ها!
+
 async def crash_begin(room, context):
-    # نقطه انفجار: توزیع استاندارد crash با سود خونه ~۱۰٪ — سقف x5 که میلیاردر نسازه!
-    cp = round(min(5.0, 0.90 / max(0.18, random.random())), 2)
+    # 💥 نقطه انفجار: توزیع پله‌ای — شرط بالاتر = خونه بی‌رحم‌تر و سقف کوتاه‌تر!
+    base, cap = crash_edge_for_bet(room.bet)
+    cp = round(min(cap, base / max(base / cap, random.random())), 2)
     if cp < 1.1:
-        cp = 1.0  # 💥 انفجار فوری (~۱۸٪)
+        cp = 1.0  # 💥 انفجار فوری
     
     room.game_data = {"crash_point": cp, "mult": 1.0, "cashed": {}}
     # 🤖 خر بات یه هدف مخفی برای برداشت داره
